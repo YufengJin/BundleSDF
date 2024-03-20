@@ -40,6 +40,13 @@ year          = {2023},
 
 
 # Docker/Environment setup
+- Git clone all dependencies
+```
+git clone --recursive https://github.com/YufengJin/BundleSDF.git
+or
+git clone https://github.com/YufengJin/BundleSDF.git &&\
+git submodule update --init --recursive
+```
 - Build the docker image (this only needs to do once and can take some time).
 ```
 cd docker
@@ -53,7 +60,13 @@ cd docker && bash run_container.sh
 # Inside docker container, compile the packages which are machine dependent
 bash build.sh
 ```
+- (Optional) Set up a new Docker image using the running container for project builds, thereby preventing the need for repetitive compilation upon container startup.
+```
+docker commit CONTAINER_ID NEW_IMAGE_NAME:TAG
 
+# get container id
+docker ps
+```
 # Run on your custom data
 - Prepare your RGBD video folder as below (also refer to the example milk data). You can find an [example milk data here](https://drive.google.com/file/d/1akutk_Vay5zJRMr3hVzZ7s69GT4gxuWN/view?usp=share_link) for testing.
 ```
