@@ -60,12 +60,15 @@ cd docker && bash run_container.sh
 # Inside docker container, compile the packages which are machine dependent
 bash build.sh
 ```
-- (Optional) Set up a new Docker image using the running container for project builds, thereby preventing the need for repetitive compilation upon container startup.
+- (Optional) Set up a new Docker image using the running container for project builds, thereby preventing the need for repetitive compilation upon container startup. (A temporary solution; the correct approach is to make modifications of dockerfile)
 ```
 docker commit CONTAINER_ID NEW_IMAGE_NAME:TAG
 
 # get container id
 docker ps
+# after creating a new image, e.g, nvcr.io/nvidian/bundlesdf:runtime(a compiled image), and modify the docker/run_container.sh.
+
+nvcr.io/nvidian/bundlesdf:latest -> nvcr.io/nvidian/bundlesdf:runtime
 ```
 # Run on your custom data
 - Prepare your RGBD video folder as below (also refer to the example milk data). You can find an [example milk data here](https://drive.google.com/file/d/1akutk_Vay5zJRMr3hVzZ7s69GT4gxuWN/view?usp=share_link) for testing.
