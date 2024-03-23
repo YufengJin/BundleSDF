@@ -50,7 +50,7 @@ git submodule update --init --recursive
 - Build the docker image (this only needs to do once and can take some time).
 ```
 cd docker
-docker build --network host -t nvcr.io/nvidian/bundlesdf .
+docker build --network host -t pearl/bundlegs .
 ```
 
 - Start a docker container the first time
@@ -60,15 +60,14 @@ cd docker && bash run_container.sh
 # Inside docker container, compile the packages which are machine dependent
 bash build.sh
 ```
-- (Optional) Set up a new Docker image using the running container for project builds, thereby preventing the need for repetitive compilation upon container startup. (A temporary solution; the correct approach is to make modifications of dockerfile)
+- (Optional) Set up a new Docker image using the running container for project builds (**after you have done `bash build.sh`**), thereby preventing the need for repetitive compilation upon container startup. (A temporary solution; the correct approach is to make modifications of dockerfile)
 ```
-docker commit CONTAINER_ID NEW_IMAGE_NAME:TAG
+docker commit CONTAINER_ID NEW_IMAGE_NAME:TAG   e.g, docker commit CONTAINER_ID pearl/bundlegs:runtime
 
-# get container id
-docker ps
-# after creating a new image, e.g, nvcr.io/nvidian/bundlesdf:runtime(a compiled image), and modify the docker/run_container.sh.
+# with `docker ps` to get CONTAINER_ID
+# after you creat a new image, and modify the docker/run_container.sh.
 
-nvcr.io/nvidian/bundlesdf:latest -> nvcr.io/nvidian/bundlesdf:runtime
+pearl/bundlegs:latest -> bundlegs:runtime
 ```
 # Run on your custom data
 - Prepare your RGBD video folder as below (also refer to the example milk data). You can find an [example milk data here](https://drive.google.com/file/d/1akutk_Vay5zJRMr3hVzZ7s69GT4gxuWN/view?usp=share_link) for testing.
