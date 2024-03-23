@@ -84,13 +84,13 @@ Due to license issues, we are not able to include [XMem](https://github.com/hkch
 - Run your RGBD video (specify the video_dir and your desired output path). There are 3 steps.
 ```
 # 1) Run joint tracking and reconstruction
-python run_custom.py --mode run_video --video_dir /home/bowen/debug/2022-11-18-15-10-24_milk --out_folder /home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk --use_segmenter 1 --use_gui 1 --debug_level 2
+python run_custom.py --mode run_video --video_dir {custom data} --out_folder {output folder} --use_segmenter 1 --use_gui 1 --debug_level 2
 
 # 2) Run global refinement post-processing to refine the mesh
-python run_custom.py --mode global_refine --video_dir /home/bowen/debug/2022-11-18-15-10-24_milk --out_folder /home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk   # Change the path to your video_directory
+python run_custom.py --mode global_refine --video_dir {custom data} --out_folder {output folder}   # Change the path to your video_directory
 
 # 3) (Optional) If you want to draw the oriented bounding box to visualize the pose, similar to our demo
-python run_custom.py --mode draw_pose --out_folder /home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk
+python run_custom.py --mode draw_pose --out_folder {output folder}
 ```
 
 - Finally the results will be dumped in the `out_folder`, including the tracked poses stored in `ob_in_cam/` and reconstructed mesh with texture `textured_mesh.obj`.
