@@ -353,17 +353,22 @@ class BundleSdf:
     logging.info(f"frame_pairs: {len(frame_pairs)}")
     is_match_ref = len(frame_pairs)==1 and frame_pairs[0][0]._ref_frame_id==frame_pairs[0][1]._id and self.bundler._newframe==frame_pairs[0][0]
 
+    # TODO figure out tfs, query_pairs
     imgs, tfs, query_pairs = self.bundler._fm.getProcessedImagePairs(frame_pairs)
     imgs = np.array([np.array(img) for img in imgs])
 
     if len(query_pairs)==0:
       return
 
+    # A set of even-numbered images and odd-numbered images are 
+    # subjected to feature matching separately, resulting in a set 
+    # of corresponding matching points' UV coordinates. corres : [[u1, v1, u2, u2, conf], ...]
     corres = self.loftr.predict(rgbAs=imgs[::2], rgbBs=imgs[1::2])
     for i_pair in range(len(query_pairs)):
       cur_corres = corres[i_pair][:,:4]
       tfA = np.array(tfs[i_pair*2])
       tfB = np.array(tfs[i_pair*2+1])
+      # TODO figure out plane to point? 2d to 2d? what is tf transformation, which is 3x3 matrix
       cur_corres[:,:2] = transform_pts(cur_corres[:,:2], np.linalg.inv(tfA))
       cur_corres[:,2:4] = transform_pts(cur_corres[:,2:4], np.linalg.inv(tfB))
       self.bundler._fm._raw_matches[query_pairs[i_pair]] = cur_corres.round().astype(np.uint16)
@@ -433,19 +438,23 @@ class BundleSdf:
 
     self.find_corres([(frame, ref_frame)])
     matches = self.bundler._fm._matches[(frame, ref_frame)]
+    print(f"\n\n/////////////////// DEBUG: matches ///////////////////////////\n \
+            matches({len(matches)}): {matches} \n \
+            /////////////////// DEBUNG: END ///////////////////////////////\n\n")
 
     if frame._status==my_cpp.Frame.FAIL:
       logging.info(f"find corres fail, mark {frame._id_str} as FAIL")
       self.bundler.forgetFrame(frame)
       return
 
-    matches = self.bundler._fm._matches[(frame, ref_frame)]
+    # TODO 23-03-23-41
+    #matches = self.bundler._fm._matches[(frame, ref_frame)]
     if len(matches)<min_match_with_ref:
       visibles = []
       for kf in self.bundler._keyframes:
         visible = my_cpp.computeCovisibility(frame, kf)
         visibles.append(visible)
-      visibles = np.array(visibles)
+      visibles = np.array(visibles)                           # ???????????
       ids = np.argsort(visibles)[::-1]
       found = False
       pdb.set_trace()
@@ -504,7 +513,6 @@ class BundleSdf:
       return
 
     self.bundler.checkAndAddKeyframe(frame)
-
 
 
   def run(self, color, depth, K, id_str, mask=None, occ_mask=None, pose_in_model=np.eye(4)):
@@ -568,7 +576,7 @@ class BundleSdf:
           for f in self.bundler._keyframes:
             ff.write(f"{f._id_str}\n")
 
-      ############# Wait for sync
+      ############# Wait for sync              # ????????????? why
       while 1:
         with self.lock:
           running = self.p_dict['running']
