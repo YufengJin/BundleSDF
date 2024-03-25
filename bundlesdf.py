@@ -23,6 +23,18 @@ try:
 except:
   pass
 
+class ForkedPdb(pdb.Pdb):
+    """A Pdb subclass that may be used
+    from a forked multiprocessing child
+
+    """
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin
 
 def run_gui(gui_dict, gui_lock):
   print("GUI started")
@@ -147,6 +159,7 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
     if cfg_nerf['continual']:
       if cnt_nerf==0:
         if translation is None:
+          # translation purpose of sc_factor and translation is to map the point cloud to the range of -1 to 1
           sc_factor,translation,pcd_real_scale, pcd_normalized = compute_scene_bounds(None,glcam_in_obs,K,use_mask=True,base_dir=cfg_nerf['save_dir'],rgbs=np.array(rgbs_all),depths=np.array(depths_all),masks=np.array(masks_all), eps=cfg_nerf['dbscan_eps'], min_samples=cfg_nerf['dbscan_eps_min_samples'])
           sc_factor *= 0.7      # Ensure whole object within bound
           cfg_nerf['sc_factor'] = float(sc_factor)
@@ -156,11 +169,11 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
           tf1 = np.eye(4)
           tf1[:3,:3] *= sc_factor
           tf_normalize = tf1@tf_normalize
-
         pcd_all = pcd_real_scale
 
       else:
         pcd_all = prev_pcd_real_scale
+        #ForkedPdb().set_trace()
         for i in range(len(rgbs)):
           pts, colors = compute_scene_bounds_worker(None,K,glcam_in_obs[len(glcam_in_obs)-len(rgbs)+i],use_mask=True,rgb=rgbs[i],depth=depths[i],mask=masks[i])
           pcd_all += toOpen3dCloud(pts, colors)
@@ -183,6 +196,7 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
       else:
         normal_maps = None
       rgbs,depths,masks,normal_maps,poses = preprocess_data(np.array(rgbs),np.array(depths),np.array(masks),normal_maps=normal_maps,poses=glcam_in_obs,sc_factor=cfg_nerf['sc_factor'],translation=cfg_nerf['translation'])
+      #ForkedPdb().set_trace()
 
     else:
       logging.info(f"compute_scene_bounds, latest nerf frame {frame_id}")
@@ -438,9 +452,6 @@ class BundleSdf:
 
     self.find_corres([(frame, ref_frame)])
     matches = self.bundler._fm._matches[(frame, ref_frame)]
-    print(f"\n\n/////////////////// DEBUG: matches ///////////////////////////\n \
-            matches({len(matches)}): {matches} \n \
-            /////////////////// DEBUNG: END ///////////////////////////////\n\n")
 
     if frame._status==my_cpp.Frame.FAIL:
       logging.info(f"find corres fail, mark {frame._id_str} as FAIL")
