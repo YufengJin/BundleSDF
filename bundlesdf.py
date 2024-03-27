@@ -23,19 +23,6 @@ try:
 except:
   pass
 
-class ForkedPdb(pdb.Pdb):
-    """A Pdb subclass that may be used
-    from a forked multiprocessing child
-
-    """
-    def interaction(self, *args, **kwargs):
-        _stdin = sys.stdin
-        try:
-            sys.stdin = open('/dev/stdin')
-            pdb.Pdb.interaction(self, *args, **kwargs)
-        finally:
-            sys.stdin = _stdin
-
 def run_gui(gui_dict, gui_lock):
   print("GUI started")
   with gui_lock:
@@ -173,7 +160,6 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
 
       else:
         pcd_all = prev_pcd_real_scale
-        #ForkedPdb().set_trace()
         for i in range(len(rgbs)):
           pts, colors = compute_scene_bounds_worker(None,K,glcam_in_obs[len(glcam_in_obs)-len(rgbs)+i],use_mask=True,rgb=rgbs[i],depth=depths[i],mask=masks[i])
           pcd_all += toOpen3dCloud(pts, colors)
@@ -196,7 +182,6 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
       else:
         normal_maps = None
       rgbs,depths,masks,normal_maps,poses = preprocess_data(np.array(rgbs),np.array(depths),np.array(masks),normal_maps=normal_maps,poses=glcam_in_obs,sc_factor=cfg_nerf['sc_factor'],translation=cfg_nerf['translation'])
-      #ForkedPdb().set_trace()
 
     else:
       logging.info(f"compute_scene_bounds, latest nerf frame {frame_id}")
@@ -237,6 +222,7 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
         nerf.add_new_frames(rgbs,depths,masks,normal_maps,poses,occ_masks=occ_masks, new_pcd=pcd_normalized, reuse_weights=False)
       else:
         nerf = NerfRunner(cfg_nerf,rgbs,depths=depths,masks=masks,normal_maps=normal_maps,occ_masks=occ_masks,poses=poses,K=K,build_octree_pcd=pcd_normalized)
+        #ForkedPdb().set_trace()
 
     logging.info(f"Start training, latest nerf frame {frame_id}")
     nerf.train()
@@ -729,6 +715,9 @@ class BundleSdf:
       normal_maps = None
 
     rgbs_raw = np.array(rgbs).copy()
+
+    #ForkedPdb().set_trace()
+
     rgbs,depths,masks,normal_maps,poses = preprocess_data(np.array(rgbs),depths=np.array(depths),masks=np.array(masks),normal_maps=normal_maps,poses=glcam_in_obs,sc_factor=self.cfg_nerf['sc_factor'],translation=self.cfg_nerf['translation'])
 
     self.cfg_nerf['sampled_frame_ids'] = np.arange(len(rgbs))
@@ -739,6 +728,8 @@ class BundleSdf:
       occ_masks = np.array(occ_masks)
     else:
       occ_masks = None
+
+    #ForkedPdb().set_trace()
 
     nerf = NerfRunner(self.cfg_nerf,rgbs,depths=depths,masks=masks,normal_maps=normal_maps,occ_masks=occ_masks,poses=poses,K=self.K,build_octree_pcd=pcd_normalized)
     print("Start training")
