@@ -104,4 +104,4 @@ ENV LD_LIBRARY_PATH /opt/conda/envs/py38/lib:$LD_LIBRARY_PATH
 RUN pip install transformations einops scikit-image awscli-plugin-endpoint gputil xatlas pymeshlab rtree dearpygui pytinyrenderer PyQt5 cython-npm chardet openpyxl
 
 RUN apt-get update --fix-missing &&\
-    apt install -y rsync lbzip2 pigz zip p7zip-full p7zip-rar
+    apt install -y rsync lbzip2 pigz zip p7zip-full p7zip-rar qt5-default
