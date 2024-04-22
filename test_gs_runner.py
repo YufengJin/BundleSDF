@@ -30,17 +30,17 @@ for file_name in npy_files:
 # create a transform from gl cam to gs cams
 # cfg = yaml.safe_load(open('gs_runner_config.yml', 'r'))
 
-import wandb
-
-wandb.login()
-run = wandb.init(
-    # Set the project where this run will be logged
-    project="Gaussian Splatting Analysis",
-    name="naive-GS-bundlesdf-datasets-new-renderer",
-    # Track hyperparameters and run metadata
-    settings=wandb.Settings(start_method="fork"),
-    mode="disabled",
-)
+#import wandb
+#
+#wandb.login()
+#run = wandb.init(
+#    # Set the project where this run will be logged
+#    project="Gaussian Splatting Analysis",
+#    name="naive-GS-bundlesdf-datasets-new-renderer",
+#    # Track hyperparameters and run metadata
+#    settings=wandb.Settings(start_method="fork"),
+#    mode="disabled",
+#)
 
 
 frameIds = [f"{i:03d}" for i in range(rgbs.shape[0])]
@@ -194,7 +194,6 @@ gsRunner = GSRunner(
     total_num_frames=total_num_frames,
 )
 gsRunner.train()
-breakpoint()
 
 for i in range(first_init_num_frames, total_num_frames):
     rgb = rgbs[i]
@@ -207,4 +206,3 @@ for i in range(first_init_num_frames, total_num_frames):
     gsRunner.add_new_frames(rgb, depth, mask, pose)
     gsRunner.train()
 
-    breakpoint()

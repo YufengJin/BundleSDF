@@ -43,6 +43,18 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 VIS_LOSS_IMAGE = True
+
+def get_img_from_fig(fig, dpi=180):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi)
+    buf.seek(0)
+    img_arr = np.frombuffer(buf.getvalue(), dtype=np.uint8)
+    buf.close()
+    img = cv2.imdecode(img_arr, 1)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    return img
+
 def get_pointcloud(
     color,
     depth,
@@ -125,15 +137,45 @@ def get_pointcloud(
     else:
         return point_cld
 
+def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
+    num_pts = new_pt_cld.shape[0]
+    means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
+    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
+    logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device="cuda")
+    if gaussian_distribution == "isotropic":
+        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
+    elif gaussian_distribution == "anisotropic":
+        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
+    else:
+        raise ValueError(f"Unknown gaussian_distribution {gaussian_distribution}")
+    params = {
+        "means3D": means3D,
+        "rgb_colors": new_pt_cld[:, 3:6],
+        "unnorm_rotations": unnorm_rots,
+        "logit_opacities": logit_opacities,
+        "log_scales": log_scales,
+    }
+    for k, v in params.items():
+        # Check if value is already a torch tensor
+        if not isinstance(v, torch.Tensor):
+            params[k] = torch.nn.Parameter(
+                torch.tensor(v).cuda().float().contiguous().requires_grad_(True)
+            )
+        else:
+            params[k] = torch.nn.Parameter(
+                v.cuda().float().contiguous().requires_grad_(True)
+            )
+
+    return params
+
+
 
 class GSRunner:
     def __init__(
         self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float
     ):
         # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
-
         # TODO check poses c2w or obs_in_cam, z axis
-
         # preprocess data -> to tensor
         self.device = torch.device(cfg_gs["primary_device"])
         self.dtype = dtype
@@ -196,7 +238,7 @@ class GSRunner:
                     "id": iter_time_idx,
                     "intrinsics": self.intrinsics,
                     "w2c": self.first_frame_w2c,
-                    "iter_gt_w2c_list": self.gt_w2c_all_frames,
+                    "iter_gt_w2c_list": self.gt_w2c_all_frames.copy(),
                 }
             )
             self.curr_frame_id += 1
@@ -231,6 +273,11 @@ class GSRunner:
         # mask = mask.astype(np.float32)
         # mask = datautils.channels_first(mask)
         # depth = datautils.channels_first(depth)
+        if colors.dtype == 'uint8':
+            colors = colors.astype(np.float32) / 255.
+
+        if masks.dtype == 'uint8' and masks.max() == 255:
+            masks = masks / 255
 
         # to tensor
         colors = torch.from_numpy(colors).to(self.device).type(self.dtype)
@@ -361,7 +408,6 @@ class GSRunner:
             depth = depth.permute(2, 0, 1)
             mask = mask.permute(2, 0, 1)
             self.gt_w2c_all_frames.append(w2c)
-            curr_gt_w2c = self.gt_w2c_all_frames.copy()
             iter_time_idx = self.curr_frame_id
 
             self.queued_data_for_train.append(
@@ -373,7 +419,7 @@ class GSRunner:
                     "id": iter_time_idx,
                     "intrinsics": self.intrinsics,
                     "w2c": self.first_frame_w2c,
-                    "iter_gt_w2c_list": self.gt_w2c_all_frames
+                    "iter_gt_w2c_list": self.gt_w2c_all_frames.copy()
                 }
             )
             self.curr_frame_id += 1
@@ -390,10 +436,8 @@ class GSRunner:
         use_l1,
         ignore_outlier_depth_loss,
         tracking=False,
-        mapping=False,
         do_ba=False,
-        visualize_loss=False,
-        tracking_iteration=None,
+        training_iter=None,
     ):
         def erosion(bool_image, kernel_size=3):
             # Convert boolean image to a tensor with dtype torch.float32
@@ -416,31 +460,23 @@ class GSRunner:
             # Initialize Loss Dictionary
 
         losses = {}
-        params = self.params
-        variables = self.variables.copy()
 
         if tracking:
             # Get current frame Gaussians, where only the camera pose gets gradient
             transformed_gaussians = transform_to_frame(
                 params, iter_time_idx, gaussians_grad=False, camera_grad=True
             )
-        elif mapping:
+        else:
             if do_ba:
                 # Get current frame Gaussians, where both camera pose and Gaussians get gradient
                 transformed_gaussians = transform_to_frame(
                     params, iter_time_idx, gaussians_grad=True, camera_grad=True
                 )
-                print("Optimizting Camera and Gaussians")
             else:
                 # Get current frame Gaussians, where only the Gaussians get gradient
                 transformed_gaussians = transform_to_frame(
                     params, iter_time_idx, gaussians_grad=True, camera_grad=False
                 )
-        else:
-            # Get current frame Gaussians, where only the Gaussians get gradient
-            transformed_gaussians = transform_to_frame(
-                params, iter_time_idx, gaussians_grad=True, camera_grad=False
-            )
 
         # Initialize Render Variables
         rendervar = transformed_params2rendervar(params, transformed_gaussians)
@@ -469,6 +505,8 @@ class GSRunner:
         ) = Renderer(
             raster_settings=curr_data["cam"]
         )(**depth_sil_rendervar)
+
+
         depth = depth_sil[0, :, :].unsqueeze(0)
         silhouette = depth_sil[1, :, :]
         presence_sil_mask = silhouette > sil_thres
@@ -489,85 +527,71 @@ class GSRunner:
         gt_im = curr_data["im"] * mask_gt
 
         # Mask with presence silhouette mask (accounts for empty space)
-        mask = mask_gt & presence_sil_mask & nan_mask
-        mask = mask.detach()
-
-        edge_mask = mask_gt | presence_sil_mask
-        edge_mask = ki.morphology.dilation(
-            edge_mask.float().unsqueeze(0), torch.ones(10, 10).cuda()
-        )
-        edge_mask = edge_mask.detach().bool()
+        if tracking:
+            mask = mask_gt | presence_sil_mask
+            mask = ki.morphology.dilation(
+                mask.float().unsqueeze(0), torch.ones(10, 10).cuda()
+            )
+            mask = mask.detach().squeeze(0).bool()
+        else:
+            mask = mask_gt & presence_sil_mask & nan_mask
+            mask = mask.detach()
 
         # canny edge detection
         gt_gray = ki.color.rgb_to_grayscale(curr_data["im"].unsqueeze(0))
 
         # sobel edges
-        gt_edge = ki.filters.sobel(gt_gray)
+        gt_edge = ki.filters.sobel(gt_gray).squeeze(0)
         # canny edges
         # gt_edge= ki.filters.canny(gt_gray)[0]
 
         gray = ki.color.rgb_to_grayscale(im.unsqueeze(0))
 
         # sobel edges
-        edge = ki.filters.sobel(gray)
+        edge = ki.filters.sobel(gray).squeeze(0)
         # edge edges
         # edge= ki.filters.canny(gray)[0]
 
         # losses['edge'] = torch.abs(gt_edge - edge)[mask.unsqueeze(0)].sum()
         if tracking:
-            losses["edge"] = torch.abs(gt_edge - edge)[edge_mask].sum()  # sum()
+            losses["edge"] = torch.abs(gt_edge - edge)[mask].sum()  # sum()
         else:
-            losses["edge"] = torch.abs(gt_edge - edge)[edge_mask].mean()
+            losses["edge"] = torch.abs(gt_edge - edge)[mask].mean()
 
         # Depth loss
-        if use_l1:
-            if tracking:
-                losses["depth"] = torch.abs(curr_data["depth"] - depth)[mask].sum()
-            else:
-                losses["depth"] = torch.abs(curr_data["depth"] - depth)[mask].mean()
-
-        """
-        # RGB Loss
-        if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
-            color_mask = torch.tile(mask, (3, 1, 1))
-            color_mask = color_mask.detach()
-            losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
-        elif tracking:
-            losses['im'] = torch.abs(curr_data['im'] - im).sum()
+        if tracking:
+            losses["depth"] = torch.abs(curr_data["depth"] - depth)[mask].sum()
         else:
-            losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
-        """
-        losses["silhouette"] = torch.abs(silhouette.float() - curr_data["mask"]).sum()
+            losses["depth"] = torch.abs(curr_data["depth"] - depth)[mask].mean()
+
+        if tracking:
+            losses["silhouette"] = torch.abs(silhouette.float() - curr_data["mask"]).sum()
+        else:
+            losses["silhouette"] = torch.abs(silhouette.float() - curr_data["mask"]).sum()
+
 
         color_mask = torch.tile(mask, (3, 1, 1))
         color_mask = color_mask.detach()
-        rgbl1 = torch.abs(gt_im - im)[color_mask].sum()
+        if tracking:
+            rgbl1 = torch.abs(gt_im - im)[color_mask].sum()
+        else:
+            rgbl1 = torch.abs(gt_im - im)[color_mask].mean()
+
         # rgbl1 = torch.abs(gt_im - im).sum()
         losses["im"] = 0.8 * rgbl1 + 0.2 * (1.0 - calc_ssim(im, gt_im))
-        if VIS_LOSS_IMAGE and (iter_time_idx) % 50 == 0:
-            # if False:
-            # if np.random.rand() < 0.1:
-            # define a function which returns an image as numpy array from figure
-            def get_img_from_fig(fig, dpi=180):
-                buf = io.BytesIO()
-                fig.savefig(buf, format="png", dpi=dpi)
-                buf.seek(0)
-                img_arr = np.frombuffer(buf.getvalue(), dtype=np.uint8)
-                buf.close()
-                img = cv2.imdecode(img_arr, 1)
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-                return img
+        if VIS_LOSS_IMAGE and (iter_time_idx) % 10 == 0:
+            # define a function which returns an image as numpy array from figure
 
             fig, ax = plt.subplots(4, 4, figsize=(12, 12))
             weighted_render_im = im * color_mask
             weighted_im = curr_data["im"] * color_mask
             weighted_render_depth = depth * mask
             weighted_depth = curr_data["depth"] * mask
-            weighted_render_candy = (edge * edge_mask).squeeze(0)
-            weighted_candy = (gt_edge * edge_mask).squeeze(0)
-            # weighted_render_candy = (edge).squeeze(0)
-            # weighted_candy = (gt_edge).squeeze(0)
+            weighted_render_candy = (edge * mask)
+            weighted_candy = (gt_edge * mask)
+            viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
+
             diff_rgb = (
                 torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
             )
@@ -577,7 +601,6 @@ class GSRunner:
                 .detach()
                 .cpu()
             )
-            viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
             diff_candy = (
                 torch.abs(weighted_render_candy - weighted_candy)
                 .mean(dim=0)
@@ -649,17 +672,17 @@ class GSRunner:
                 torch.clamp(diff_candy.detach().squeeze().cpu(), 0.0, 1.0), cmap="jet"
             )
             ax[3, 2].set_title(f"Diff Edge: {torch.round(losses['edge'])}")
-            ax[3, 3].imshow(torch.clamp(diff_sil, 0.0, 1.0), cmap="jet")
+            ax[3, 3].imshow(diff_sil, cmap="jet")
             ax[3, 3].set_title(f"Silhouette Loss: {float(losses['silhouette'])}")
             # Turn off axis
             for i in range(2):
                 for j in range(4):
                     ax[i, j].axis("off")
             # Set Title
-            if tracking_iteration:
-                suptitle = f"frame_id: {curr_data['id']}, Tracking Iteration: {tracking_iteration}"
+            if tracking:
+                suptitle = f"frame_id: {curr_data['id']}, Tracking Iteration: {training_iter}"
             else:
-                suptitle = f"frame_id: {curr_data['id']}, Mapping"
+                suptitle = f"frame_id: {curr_data['id']}, Mapping Iteration: {training_iter}"
             fig.suptitle(suptitle, fontsize=16)
             # Figure Tight Layout
             fig.tight_layout()
@@ -667,7 +690,7 @@ class GSRunner:
             os.makedirs(plot_dir, exist_ok=True)
             current_time = datetime.datetime.now()
             filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-            plt.show()
+            #plt.show()
             plt.savefig(
                 os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
             )
@@ -679,7 +702,7 @@ class GSRunner:
             ## Save Tracking Loss Viz
             # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
             # os.makedirs(save_plot_dir, exist_ok=True)
-            # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
+            # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % training_iter), bbox_inches='tight')
             # plt.close()
 
         weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
@@ -701,11 +724,10 @@ class GSRunner:
 
         return loss, variables, weighted_losses
 
+    @staticmethod
     def add_new_gaussians(
-        curr_data, sil_thres, time_idx, mean_sq_dist_method, gaussian_distribution
+        params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, gaussian_distribution
     ):
-        params = self.params
-        variables = self.variables
         # Silhouette Rendering
         transformed_gaussians = transform_to_frame(
             params, time_idx, gaussians_grad=False, camera_grad=False
@@ -803,9 +825,9 @@ class GSRunner:
             new_pt_cld, mean3_sq_dist = get_pointcloud(
                 curr_data["im"],
                 curr_data["depth"],
+                non_presence_mask,
                 curr_data["intrinsics"],
                 curr_w2c,
-                mask=non_presence_mask,
                 compute_mean_sq_dist=True,
                 mean_sq_dist_method=mean_sq_dist_method,
             )
@@ -844,7 +866,8 @@ class GSRunner:
         except:
             print("Visualization of points fails")
 
-    def initialize_optimizer(self, params, lrs_dict, tracking):
+    @staticmethod
+    def initialize_optimizer(params, lrs_dict, tracking):
         lrs = lrs_dict
         param_groups = [
             {"params": [v], "name": k, "lr": lrs[k]} for k, v in params.items()
@@ -864,6 +887,11 @@ class GSRunner:
             curr_data = self.queued_data_for_train.popleft()
             time_idx = curr_data["id"]
             curr_gt_w2c = curr_data["iter_gt_w2c_list"]
+
+            color = curr_data['im']
+            depth = curr_data['depth']
+            mask = curr_data['mask']
+            intrinsics = curr_data['intrinsics']
             print(f"INFO: Training, processing frame_id : {time_idx}")
 
             if time_idx > 0:
@@ -890,6 +918,7 @@ class GSRunner:
             )
             candidate_cam_tran = params["cam_trans"][..., time_idx].detach().clone()
             current_min_loss = float(1e20)
+
             # tracking optimization
             tracking_iter = 0
             do_continue_slam = False
@@ -911,7 +940,7 @@ class GSRunner:
                     config["tracking"]["use_l1"],
                     config["tracking"]["ignore_outlier_depth_loss"],
                     tracking=True,
-                    tracking_iteration=tracking_iter,
+                    training_iter=tracking_iter,
                 )
                 if config["use_wandb"]:
                     # report loss
@@ -969,11 +998,11 @@ class GSRunner:
                 if tracking_iter == num_iters_tracking:
                     if (
                         losses["depth"] < config["tracking"]["depth_loss_thres"]
-                        and config["tracking"]["use_depth_loss_thres"]
+                        and config["tracking"]["use_depth_for_loss"]
                     ):
                         break
                     elif (
-                        config["tracking"]["use_depth_loss_thres"]
+                        config["tracking"]["use_depth_for_loss"]
                         and not do_continue_slam
                     ):
                         do_continue_slam = True
@@ -1000,8 +1029,8 @@ class GSRunner:
 
             # Update the runtime numbers
             tracking_end_time = time.time()
-            tracking_frame_time_sum += tracking_end_time - tracking_start_time
-            tracking_frame_time_count += 1
+            self.tracking_frame_time_sum += tracking_end_time - tracking_start_time
+            self.tracking_frame_time_count += 1
 
             if (
                 time_idx == 0
@@ -1052,6 +1081,8 @@ class GSRunner:
                     # Add new Gaussians to the scene based on the Silhouette
                     # TODO add masked gaussian
                     self.add_new_gaussians(
+                        params,
+                        variables,
                         curr_data,
                         config["mapping"]["sil_thres"],
                         time_idx,
@@ -1080,16 +1111,16 @@ class GSRunner:
                     num_keyframes = config["mapping_window_size"] - 2
 
                     selected_keyframes = keyframe_selection_overlap(
-                        depth, curr_w2c, intrinsics, keyframe_list[:-1], num_keyframes
+                        depth, curr_w2c, intrinsics, self.keyframe_list[:-1], num_keyframes
                     )
                     selected_time_idx = [
-                        keyframe_list[frame_idx]["id"]
+                        self.keyframe_list[frame_idx]["id"]
                         for frame_idx in selected_keyframes
                     ]
-                    if len(keyframe_list) > 0:
+                    if len(self.keyframe_list) > 0:
                         # Add last keyframe to the selected keyframes
-                        selected_time_idx.append(keyframe_list[-1]["id"])
-                        selected_keyframes.append(len(keyframe_list) - 1)
+                        selected_time_idx.append(self.keyframe_list[-1]["id"])
+                        selected_keyframes.append(len(self.keyframe_list) - 1)
                     # Add current frame to the selected keyframes
                     selected_time_idx.append(time_idx)
                     selected_keyframes.append(-1)
@@ -1099,17 +1130,17 @@ class GSRunner:
                     )
 
                 # Reset Optimizer & Learning Rates for Full Map Optimization
-                optimizer = initialize_optimizer(
+                optimizer = self.initialize_optimizer(
                     params, config["mapping"]["lrs"], tracking=False
                 )
 
                 # Mapping
                 mapping_start_time = time.time()
-                if num_iters_mapping > 0:
+                if config['mapping']['num_iters'] > 0:
                     progress_bar = tqdm(
-                        range(num_iters_mapping), desc=f"Mapping Time Step: {time_idx}"
+                        range(config['mapping']['num_iters']), desc=f"Mapping Time Step: {time_idx}"
                     )
-                for mapping_iter in range(num_iters_mapping):
+                for mapping_iter in range(config['mapping']['num_iters']):
                     iter_start_time = time.time()
                     # Randomly select a frame until current time step amongst keyframes
                     rand_idx = np.random.randint(0, len(selected_keyframes))
@@ -1122,27 +1153,21 @@ class GSRunner:
                         iter_mask = mask
                     else:
                         # Use Keyframe Data
-                        iter_time_idx = keyframe_list[selected_rand_keyframe_idx]["id"]
-                        iter_color = keyframe_list[selected_rand_keyframe_idx]["color"]
-                        iter_depth = keyframe_list[selected_rand_keyframe_idx]["depth"]
-                        iter_mask = keyframe_list[selected_rand_keyframe_idx]["mask"]
-                    iter_gt_w2c = gt_w2c_all_frames[: iter_time_idx + 1]
+                        iter_time_idx = self.keyframe_list[selected_rand_keyframe_idx]["id"]
+                        iter_color = self.keyframe_list[selected_rand_keyframe_idx]["color"]
+                        iter_depth = self.keyframe_list[selected_rand_keyframe_idx]["depth"]
+                        iter_mask = self.keyframe_list[selected_rand_keyframe_idx]["mask"]
+                    iter_gt_w2c = self.gt_w2c_all_frames[: iter_time_idx + 1]
                     iter_data = {
-                        "cam": cam,
+                        "cam": self.cam,
                         "im": iter_color,
                         "depth": iter_depth,
                         "mask": iter_mask,
                         "id": iter_time_idx,
                         "intrinsics": intrinsics,
-                        "w2c": first_frame_w2c,
+                        "w2c": self.first_frame_w2c,
                         "iter_gt_w2c_list": iter_gt_w2c,
                     }
-                    if mapping_iter % 10 == 0 and time_idx % 5 == 0:
-                        visualize_loss = True
-                    else:
-                        visualize_loss = False
-
-                    visualize_loss = True
                     # Loss for current frame
                     loss, variables, losses = self.get_loss(
                         params,
@@ -1154,8 +1179,9 @@ class GSRunner:
                         config["mapping"]["sil_thres"],
                         config["mapping"]["use_l1"],
                         config["mapping"]["ignore_outlier_depth_loss"],
-                        mapping=True,
+                        tracking=False,
                         do_ba=False,
+                        training_iter=mapping_iter
                     )
                     if config["use_wandb"]:
                         # Report Loss
@@ -1254,7 +1280,7 @@ class GSRunner:
                 # if time_idx % 5 == 0:
                 #     visualize_param_info(params)
 
-                if num_iters_mapping > 0:
+                if config['mapping']['num_iters'] > 0:
                     progress_bar.close()
                 # Update the runtime numbers
                 mapping_end_time = time.time()
@@ -1310,7 +1336,7 @@ class GSRunner:
                 (
                     (time_idx == 0)
                     or ((time_idx + 1) % config["keyframe_every"] == 0)
-                    or (time_idx == num_frames - 2)
+                    or (time_idx == self._total_num_frames - 2)
                 )
                 and (not torch.isinf(curr_gt_w2c[-1]).any())
                 and (not torch.isnan(curr_gt_w2c[-1]).any())
@@ -1333,8 +1359,8 @@ class GSRunner:
                         "mask": mask,
                     }
                     # Add to keyframe list
-                    keyframe_list.append(curr_keyframe)
-                    keyframe_time_indices.append(time_idx)
+                    self.keyframe_list.append(curr_keyframe)
+                    self.keyframe_time_indices.append(time_idx)
 
             # Checkpoint every iteration
             if (
@@ -1355,3 +1381,5 @@ class GSRunner:
                 wandb_time_step += 1
 
             torch.cuda.empty_cache()
+
+            #TODO logging computation time
