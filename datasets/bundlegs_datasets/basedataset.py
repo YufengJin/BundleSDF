@@ -314,7 +314,8 @@ class GradSLAMDataset(torch.utils.data.Dataset):
     def __getitem__(self, index):
         color_path = self.color_paths[index]
         depth_path = self.depth_paths[index]
-        color = np.asarray(imageio.imread(color_path))
+        color = np.asarray(cv2.imread(color_path))
+        
         color = self._preprocess_color(color)
         if ".png" in depth_path:
             depth = np.asarray(imageio.imread(depth_path))

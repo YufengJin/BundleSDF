@@ -12,13 +12,16 @@ import shutil
 import time
 import yaml
 import tqdm
+import cv2
 import argparse
 import numpy as np
+import hashlib
 import matplotlib.pyplot as plt
 from importlib.machinery import SourceFileLoader
 
 from datasets.bundlegs_datasets import (load_dataset_config, HO3D_v3Dataset, BOPDataset)
 from utils.common_utils import seed_everything, save_params_ckpt, save_params
+from bundlegs import *
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["ho3d_v3"]:
@@ -30,7 +33,7 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
 
 def run_once(config: dict):
     cfg_bundletrack_cfg = os.path.join(_BASE_DIR, config["bundletrack_cfg"])
-    cfg_bundletrack = yaml.load(open(cfg_bundletrack_cfg, 'r'), Loader=yaml.Loader)
+    cfg_bundletrack = yaml.load(open(cfg_bundletrack_cfg, 'r'))#, Loader=yaml.Loader)
 
     out_folder = os.path.join(
         config["workdir"], config["run_name"]
@@ -64,7 +67,8 @@ def run_once(config: dict):
     yaml.dump(cfg_bundletrack, open(cfg_track_dir,'w'))
 
     # use Efficient SAM
-    if config['use_segmenter']:
+    use_segmenter = config['use_segmenter']
+    if use_segmenter:
         segmenter = Segmenter()
 
     # dataLoader
@@ -96,9 +100,7 @@ def run_once(config: dict):
         num_frames = len(dataset)
         dataset_config['num_frames'] = num_frames
 
-    assert config['data']['num_frames'] == num_frames
-
-    #tracker = BundleGS(cfg_track_dir=cfg_track_dir, cfg_gs=config, start_gs_keyframes=1, use_gui=cong['use_gui'])
+    tracker = BundleGS(cfg_track_dir=cfg_track_dir, cfg_gs=config, total_num_frames = num_frames, start_gs_keyframes=5, use_gui=config['use_gui'])
 
     if config['load_checkpoint']:
         #TODO check save ckpt before updating checkpoint_time_idx and save into exp
@@ -119,23 +121,34 @@ def run_once(config: dict):
         else:
             color, depth, K, gt_pose = data
 
-        if time_id == 0:
+        if time_idx == 0:
             if mask is None:
                 # get initial mask through labeling 
                 if use_segomenter:
-                    bbox=None
-                    mask = segmenter(color, bbox)
+                    mask = segmenter()
                 else:
                     raise("ERROR: No initial mask")
 
+        else:
+            if use_segmenter:
+                mask = segmenter.update()
             else:
-                if use_segmenter:
-                    mask = segmenter.update(prev_color)
-                else:
-                    mask = mask  
+                mask = mask  
+        
+        if cfg_bundletrack['erode_mask']>0:
+            kernel = np.ones((cfg_bundletrack['erode_mask'], cfg_bundletrack['erode_mask']), np.uint8)
+            mask = cv2.erode(mask.astype(np.uint8), kernel)
 
-            id_str = reader.id_strs[i]
-            pose_in_model = np.eye(4)
+        # create a hash
+        id_str = f"{time_idx:06d}".encode('utf-8')
+        hash_object = hashlib.sha256()
+        hash_object.update(id_str)
+
+        # Get the hexadecimal representation of the hash
+        id_str = hash_object.hexdigest()
+
+        # set initial pose identity
+        pose_in_model = np.eye(4)
 
         # TODO how to put gt pose into tracker
         tracker.run(color, depth, K, id_str, mask=mask, occ_mask=None, pose_in_model=pose_in_model)

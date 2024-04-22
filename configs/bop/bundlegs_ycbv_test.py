@@ -5,7 +5,7 @@ scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", 
 
 primary_device="cuda:0"
 seed = 0
-use_gui = False
+use_gui = True 
 debug_level=2
 
 scene_name = scenes[2]
@@ -35,6 +35,7 @@ config = dict(
     report_global_progress_every=500, # Report Global Progress every nth frame
     eval_every=5, # Evaluate every nth frame (at end of SLAM)
     scene_radius_depth_ratio=3, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
+    sync_max_delay=2,
     mean_sq_dist_method="projective", # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
     gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
     report_iter_progress=False,
