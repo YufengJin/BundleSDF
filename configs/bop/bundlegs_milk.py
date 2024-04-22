@@ -3,18 +3,16 @@ from os.path import join as p_join
 
 primary_device="cuda:0"
 seed = 0
-use_gui = False
+use_gui = True 
 debug_level=2
 
 scene_name = '000000'
 
-target_object_id = 101              # 101  milk, 5 mustard bottle
-
-map_every = 5 
+map_every = 1
 keyframe_every = 5
 mapping_window_size = 24
-tracking_iters = 30
-mapping_iters = 80 
+tracking_iters = 80 
+mapping_iters = 80
 
 group_name = "bop"
 run_name = f"{scene_name}_{seed}"
@@ -34,6 +32,7 @@ config = dict(
     report_global_progress_every=500, # Report Global Progress every nth frame
     eval_every=5, # Evaluate every nth frame (at end of SLAM)
     scene_radius_depth_ratio=3, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
+    sync_max_delay=0, # Max frames delay between bundletrack and gaussian splats
     mean_sq_dist_method="projective", # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
     gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
     report_iter_progress=False,
@@ -69,6 +68,9 @@ config = dict(
         use_sil_for_loss=True,
         sil_thres=0.99,
         use_l1=True,
+        depth_loss_thres=15000,
+        edge_loss_thres=15000,
+        use_depth_for_loss=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=1.,
@@ -82,7 +84,7 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.0005,
+            cam_unnorm_rots=0.001,
             cam_trans=0.001,
         ),
     ),

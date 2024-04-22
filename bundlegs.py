@@ -8,7 +8,7 @@
 
 
 from Utils import *
-from nerf_runner import *
+from gs_runner import *
 from tool import *
 
 code_dir = os.path.dirname(os.path.realpath(__file__))
@@ -82,7 +82,7 @@ def run_nerf(
     p_dict,
     kf_to_nerf_list,
     lock,
-    cfg_nerf,
+    cfg_gs,
     total_num_frames,
     translation,
     sc_factor,
@@ -181,6 +181,7 @@ def run_nerf(
             time.sleep(0.01)
             continue
 
+        ForkedPdb().set_trace()
         cnt_nerf += 1
         rgbs_all += list(rgbs)
         depths_all += list(depths)
@@ -340,80 +341,62 @@ def run_nerf(
         #     occ_masks = None
 
         
-        ForkedPdb().set_trace()
 
         if cnt_nerf == 0:
             logging.info(f"First nerf run, create Runner, latest nerf frame {frame_id}")
-            nerf = NerfRunner(
-                cfg_nerf,
-                rgbs,
-                depths=depths,
-                masks=masks,
-                normal_maps=normal_maps,
-                occ_masks=occ_masks,
-                poses=poses,
-                K=K,
-                build_octree_pcd=pcd_normalized,
-            )
-            ForkedPdb().set_trace()
+            gs_runner = GSRunner(
+                         cfg_gs,
+                         rgbs=rgbs,
+                         depths=depths,
+                         masks=masks,
+                         K=K,
+                         poses=poses,
+                         total_num_frames=total_num_frames,
+                     )
+
         else:
-            if cfg_nerf["continual"]:
-                logging.info(f"add_new_frames, latest nerf frame {frame_id}")
-                nerf.add_new_frames(
-                    rgbs,
-                    depths,
-                    masks,
-                    normal_maps,
-                    poses,
-                    occ_masks=occ_masks,
-                    new_pcd=pcd_normalized,
-                    reuse_weights=False,
-                )
-                ForkedPdb().set_trace()
-            else:
-                nerf = NerfRunner(
-                    cfg_nerf,
-                    rgbs,
-                    depths=depths,
-                    masks=masks,
-                    normal_maps=normal_maps,
-                    occ_masks=occ_masks,
-                    poses=poses,
-                    K=K,
-                    build_octree_pcd=pcd_normalized,
-                )
-                ForkedPdb().set_trace()
+            gs_runner.add_new_frames(
+                rgbs,
+                depths,
+                masks,
+                poses,
+            )
 
         logging.info(f"Start training, latest nerf frame {frame_id}")
-        nerf.train()
+        gs_runner.train()
         logging.info(f"Training done, latest nerf frame {frame_id}")
 
-        optimized_cvcam_in_obs, offset = get_optimized_poses_in_real_world(
-            poses,
-            nerf.models["pose_array"],
-            cfg_nerf["sc_factor"],
-            cfg_nerf["translation"],
-        )
+        optimized_cvcam_in_obs = gs_runner.get_optimized_cam_poses()
+        optimized_cvcam_in_obs[:,:3, 1:3] *= -1
 
-        logging.info("Getting mesh")
-        mesh = nerf.extract_mesh(isolevel=0, voxel_size=cfg_nerf["mesh_resolution"])
-        mesh = mesh_to_real_world(
-            mesh,
-            pose_offset=offset,
-            translation=nerf.cfg["translation"],
-            sc_factor=nerf.cfg["sc_factor"],
-        )
+        logging.info(f"camera pose updated. \nWas: {cam_in_obs}\nNow:{optimized_cvcam_in_obs}")
+        ForkedPdb().set_trace()
+        #optimized_cvcam_in_obs, offset = get_optimized_poses_in_real_world(
+        #    poses,
+        #    nerf.models["pose_array"],
+        #    cfg_nerf["sc_factor"],
+        #    cfg_nerf["translation"],
+        #)
+
+        #logging.info("Getting mesh")
+        #mesh = nerf.extract_mesh(isolevel=0, voxel_size=cfg_nerf["mesh_resolution"])
+        #mesh = mesh_to_real_world(
+        #    mesh,
+        #    pose_offset=offset,
+        #    translation=nerf.cfg["translation"],
+        #    sc_factor=nerf.cfg["sc_factor"],
+        #)
 
         with lock:
             p_dict["optimized_cvcam_in_obs"] = optimized_cvcam_in_obs
             p_dict["running"] = False
             # p_dict['nerf_last'] = nerf    #!NOTE not pickable
-            p_dict["mesh"] = mesh
+            #p_dict["mesh"] = mesh
 
         logging.info(f"nerf done at frame {frame_id}")
 
-        if cfg_nerf["continual"]:
-            prev_pcd_real_scale = pcd_all.voxel_down_sample(vox_res)
+        #if cfg_nerf["continual"]:
+        #    prev_pcd_real_scale = pcd_all.voxel_down_sample(vox_res)
 
         ####### Log
         if SPDLOG >= 2:
@@ -809,6 +792,7 @@ class BundleGS:
                 with self.lock:
                     running = self.p_dict["running"]
                     nerf_num_frames = self.p_dict["nerf_num_frames"]
+                print(f'////////////////Nerf is running :{running}, and nerf_num_frames: {nerf_num_frames}, len(self.bundler._keyframes): {len(self.bundler._keyframes)}')
                 if not running:
                     break
                 if (
@@ -816,7 +800,7 @@ class BundleGS:
                     >= self.cfg_gs["sync_max_delay"]
                 ):
                     time.sleep(0.01)
-                    # logging.info(f"wait for sync len(self.bundler._keyframes):{len(self.bundler._keyframes)}, nerf_num_frames:{nerf_num_frames}")
+                    #logging.info(f"wait for sync len(self.bundler._keyframes):{len(self.bundler._keyframes)}, nerf_num_frames:{nerf_num_frames}")
                     continue
                 break
 

@@ -155,10 +155,6 @@ def run_once(config: dict):
     tracker.on_finish()
 
 
-
-
-    
-
     
     # Object tracking and Gaussian splats generation occur simultaneously
     pass

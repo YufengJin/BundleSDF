@@ -184,6 +184,8 @@ first_depths = depths[:first_init_num_frames, ...]
 first_masks = masks[:first_init_num_frames, ...]
 first_poses = poses[:first_init_num_frames, ...]
 
+breakpoint()
+
 gsRunner = GSRunner(
     cfg,
     rgbs=first_rgbs,

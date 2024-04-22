@@ -14,8 +14,8 @@ scene_name = scenes[0]
 map_every = 1
 keyframe_every = 5
 mapping_window_size = 24
-tracking_iters = 40
-mapping_iters = 60
+tracking_iters = 80 
+mapping_iters = 80
 
 group_name = "ho3d_v3"
 run_name = f"{scene_name}_{seed}"
@@ -70,6 +70,9 @@ config = dict(
         use_sil_for_loss=True,
         sil_thres=0.99,
         use_l1=True,
+        depth_loss_thres=15000,
+        edge_loss_thres=15000,
+        use_depth_for_loss=True,
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=1.,
@@ -83,7 +86,7 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.0005,
+            cam_unnorm_rots=0.001,
             cam_trans=0.001,
         ),
     ),

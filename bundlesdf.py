@@ -308,7 +308,7 @@ def run_nerf(
         else:
             occ_masks = None
 
-        ForkedPdb().set_trace()
+        #ForkedPdb().set_trace()
         if cnt_nerf == 0:
             logging.info(f"First nerf run, create Runner, latest nerf frame {frame_id}")
             nerf = NerfRunner(
@@ -322,7 +322,7 @@ def run_nerf(
                 K=K,
                 build_octree_pcd=pcd_normalized,
             )
-            ForkedPdb().set_trace()
+            #ForkedPdb().set_trace()
         else:
             if cfg_nerf["continual"]:
                 logging.info(f"add_new_frames, latest nerf frame {frame_id}")
@@ -336,7 +336,6 @@ def run_nerf(
                     new_pcd=pcd_normalized,
                     reuse_weights=False,
                 )
-                ForkedPdb().set_trace()
             else:
                 nerf = NerfRunner(
                     cfg_nerf,
@@ -349,7 +348,7 @@ def run_nerf(
                     K=K,
                     build_octree_pcd=pcd_normalized,
                 )
-                ForkedPdb().set_trace()
+                #ForkedPdb().set_trace()
 
         logging.info(f"Start training, latest nerf frame {frame_id}")
         nerf.train()

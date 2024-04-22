@@ -42,7 +42,7 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
-VIS_LOSS_IMAGE = True
+VIS_LOSS_IMAGE = False 
 
 def get_img_from_fig(fig, dpi=180):
     buf = io.BytesIO()
@@ -184,7 +184,7 @@ class GSRunner:
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
 
-        self._fisrt_c2w = poses[0]
+        self._fisrt_c2w = poses[0].copy()
 
         poses = self._preprocess_poses(poses)
 
@@ -243,6 +243,7 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
+    
     def _preprocess_poses(self, poses):
         r"""Preprocesses the poses by setting first pose in a sequence to identity and computing the relative
         homogenous transformation for all other poses.
@@ -258,7 +259,7 @@ class GSRunner:
             - Output: :math:`(L, 4, 4)` where :math:`L` denotes sequence length.
         """
         # opencv c2w to opengl
-        # poses[:, :3, 1:3] = -poses[:, :3, 1:3]
+        poses[:, :3, 1:3] = -poses[:, :3, 1:3]
         poses = torch.from_numpy(poses).to(self.device).type(self.dtype)
         return relative_transformation(
             poses[0].unsqueeze(0).repeat(poses.shape[0], 1, 1),
@@ -580,7 +581,7 @@ class GSRunner:
         # rgbl1 = torch.abs(gt_im - im).sum()
         losses["im"] = 0.8 * rgbl1 + 0.2 * (1.0 - calc_ssim(im, gt_im))
 
-        if VIS_LOSS_IMAGE and (iter_time_idx) % 10 == 0:
+        if VIS_LOSS_IMAGE and (training_iter) % 5 == 0:
             # define a function which returns an image as numpy array from figure
 
             fig, ax = plt.subplots(4, 4, figsize=(12, 12))
@@ -707,13 +708,15 @@ class GSRunner:
 
         weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
 
-        msg = "DEBUG: "
+        #TODO wandb the loss
+        msg = f'INFO: Tracking iter {training_iter}\n' if tracking else f'INFO: Mapping iter {training_iter}\n'
         for k, v in losses.items():
             msg += f"\t{k} loss: {v.item():.6f} weighted loss: {v.item() * loss_weights[k]:.6f}\n"
 
-        print(msg)
 
         loss = sum(weighted_losses.values())
+        msg += f"total loss: {loss.item()}"
+        #print(msg)
 
         seen = radius > 0
         variables["max_2D_radius"][seen] = torch.max(
@@ -877,6 +880,23 @@ class GSRunner:
         else:
             return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
+    def get_optimized_cam_poses(self):
+        opt_cam_poses = []
+        with torch.no_grad():
+            # Get the current estimated rotation & translation
+            for time_idx in range(self.curr_frame_id):
+                cam_rot = F.normalize(
+                    self.params["cam_unnorm_rots"][..., time_idx].detach()
+                )
+                cam_tran = self.params["cam_trans"][..., time_idx].detach()
+                w2c = torch.eye(4).cuda().float()
+                w2c[:3, :3] = build_rotation(cam_rot)
+                w2c[:3, 3] = cam_tran
+
+                opt_cam_poses.append(self._fisrt_c2w @ w2c.cpu().numpy())
+                
+        return np.asarray(opt_cam_poses)
+
     def train(self):
         # TODO pop the earliest data
         config = self.cfg_gs
@@ -905,132 +925,132 @@ class GSRunner:
                     params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
                     params["cam_trans"][..., time_idx] = rel_w2c_tran
 
-            # tracking
-            tracking_start_time = time.time()
+                # tracking
+                tracking_start_time = time.time()
 
-            # reset optimizer & learning rates for tracking
-            optimizer = self.initialize_optimizer(
-                params, config["tracking"]["lrs"], tracking=True
-            )
-            # keep track of best candidate rotation & translation
-            candidate_cam_unnorm_rot = (
-                params["cam_unnorm_rots"][..., time_idx].detach().clone()
-            )
-            candidate_cam_tran = params["cam_trans"][..., time_idx].detach().clone()
-            current_min_loss = float(1e20)
-
-            # tracking optimization
-            tracking_iter = 0
-            do_continue_slam = False
-            num_iters_tracking = config["tracking"]["num_iters"]
-            progress_bar = tqdm(
-                range(num_iters_tracking), desc=f"tracking time step: {time_idx}"
-            )
-            while True:
-                iter_start_time = time.time()
-                # loss for current frame
-                loss, variables, losses = self.get_loss(
-                    params,
-                    curr_data,
-                    variables,
-                    time_idx,
-                    config["tracking"]["loss_weights"],
-                    config["tracking"]["use_sil_for_loss"],
-                    config["tracking"]["sil_thres"],
-                    config["tracking"]["use_l1"],
-                    config["tracking"]["ignore_outlier_depth_loss"],
-                    tracking=True,
-                    training_iter=tracking_iter,
+                # reset optimizer & learning rates for tracking
+                optimizer = self.initialize_optimizer(
+                    params, config["tracking"]["lrs"], tracking=True
                 )
-                if config["use_wandb"]:
-                    # report loss
-                    wandb_tracking_step = report_loss(
-                        losses, wandb_run, wandb_tracking_step, tracking=True
+                # keep track of best candidate rotation & translation
+                candidate_cam_unnorm_rot = (
+                    params["cam_unnorm_rots"][..., time_idx].detach().clone()
+                )
+                candidate_cam_tran = params["cam_trans"][..., time_idx].detach().clone()
+                current_min_loss = float(1e20)
+
+                # tracking optimization
+                tracking_iter = 0
+                do_continue_slam = False
+                num_iters_tracking = config["tracking"]["num_iters"]
+                progress_bar = tqdm(
+                    range(num_iters_tracking), desc=f"tracking time step: {time_idx}"
+                )
+                while True:
+                    # loss for current frame
+                    loss, variables, losses = self.get_loss(
+                        params,
+                        curr_data,
+                        variables,
+                        time_idx,
+                        config["tracking"]["loss_weights"],
+                        config["tracking"]["use_sil_for_loss"],
+                        config["tracking"]["sil_thres"],
+                        config["tracking"]["use_l1"],
+                        config["tracking"]["ignore_outlier_depth_loss"],
+                        tracking=True,
+                        training_iter=tracking_iter,
                     )
-                # backprop
-                loss.backward()
-                # optimizer update
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                with torch.no_grad():
-                    # save the best candidate rotation & translation
-                    if loss < current_min_loss:
-                        current_min_loss = loss
-                        candidate_cam_unnorm_rot = (
-                            params["cam_unnorm_rots"][..., time_idx].detach().clone()
+                    if config["use_wandb"]:
+                        # report loss
+                        wandb_tracking_step = report_loss(
+                            losses, wandb_run, wandb_tracking_step, tracking=True
                         )
-                        candidate_cam_tran = (
-                            params["cam_trans"][..., time_idx].detach().clone()
-                        )
-                    # report progress
-                    if config["report_iter_progress"]:
-                        if config["use_wandb"]:
-                            report_progress(
-                                params,
-                                tracking_curr_data,
-                                tracking_iter + 1,
-                                progress_bar,
-                                time_idx,
-                                sil_thres=config["tracking"]["sil_thres"],
-                                tracking=True,
-                                wandb_run=wandb_run,
-                                wandb_step=wandb_tracking_step,
-                                wandb_save_qual=config["wandb"]["save_qual"],
+                    # backprop
+                    loss.backward()
+                    # optimizer update
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    with torch.no_grad():
+                        # save the best candidate rotation & translation
+                        if loss < current_min_loss:
+                            current_min_loss = loss
+                            candidate_cam_unnorm_rot = (
+                                params["cam_unnorm_rots"][..., time_idx].detach().clone()
                             )
+                            candidate_cam_tran = (
+                                params["cam_trans"][..., time_idx].detach().clone()
+                            )
+                        # report progress
+                        if config["report_iter_progress"]:
+                            if config["use_wandb"]:
+                                report_progress(
+                                    params,
+                                    tracking_curr_data,
+                                    tracking_iter + 1,
+                                    progress_bar,
+                                    time_idx,
+                                    sil_thres=config["tracking"]["sil_thres"],
+                                    tracking=True,
+                                    wandb_run=wandb_run,
+                                    wandb_step=wandb_tracking_step,
+                                    wandb_save_qual=config["wandb"]["save_qual"],
+                                )
+                            else:
+                                report_progress(
+                                    params,
+                                    tracking_curr_data,
+                                    tracking_iter + 1,
+                                    progress_bar,
+                                    time_idx,
+                                    sil_thres=config["tracking"]["sil_thres"],
+                                    tracking=True,
+                                )
                         else:
-                            report_progress(
-                                params,
-                                tracking_curr_data,
-                                tracking_iter + 1,
-                                progress_bar,
-                                time_idx,
-                                sil_thres=config["tracking"]["sil_thres"],
-                                tracking=True,
+                            progress_bar.update(1)
+                    # update the runtime numbers
+                    # check if we should stop tracking
+                    tracking_iter += 1
+                    if tracking_iter == num_iters_tracking:
+                        if (
+                            losses["depth"] < config["tracking"]["depth_loss_thres"]
+                            and config["tracking"]["use_depth_for_loss"]
+                        ):
+                            break
+                        elif (
+                            config["tracking"]["use_depth_for_loss"]
+                            and not do_continue_slam
+                        ):
+                            do_continue_slam = True
+                            progress_bar = tqdm(
+                                range(num_iters_tracking),
+                                desc=f"tracking time step: {time_idx}",
                             )
-                    else:
-                        progress_bar.update(1)
-                # update the runtime numbers
-                iter_end_time = time.time()
-                self.tracking_iter_time_sum += iter_end_time - iter_start_time
-                self.tracking_iter_time_count += 1
-                # check if we should stop tracking
-                tracking_iter += 1
-                if tracking_iter == num_iters_tracking:
-                    if (
-                        losses["depth"] < config["tracking"]["depth_loss_thres"]
-                        and config["tracking"]["use_depth_for_loss"]
-                    ):
-                        break
-                    elif (
-                        config["tracking"]["use_depth_for_loss"]
-                        and not do_continue_slam
-                    ):
-                        do_continue_slam = True
-                        progress_bar = tqdm(
-                            range(num_iters_tracking),
-                            desc=f"tracking time step: {time_idx}",
-                        )
-                        num_iters_tracking = 2 * num_iters_tracking
-                        if config["use_wandb"]:
-                            wandb_run.log(
-                                {
-                                    "tracking/extra tracking iters frames": time_idx,
-                                    "tracking/step": wandb_time_step,
-                                }
-                            )
-                    else:
-                        break
+                            num_iters_tracking = 2 * num_iters_tracking
+                            if config["use_wandb"]:
+                                wandb_run.log(
+                                    {
+                                        "tracking/extra tracking iters frames": time_idx,
+                                        "tracking/step": wandb_time_step,
+                                    }
+                                )
+                        else:
+                            break
 
-            progress_bar.close()
-            # Copy over the best candidate rotation & translation
-            with torch.no_grad():
-                params["cam_unnorm_rots"][..., time_idx] = candidate_cam_unnorm_rot
-                params["cam_trans"][..., time_idx] = candidate_cam_tran
+                progress_bar.close()
+                # Copy over the best candidate rotation & translation
+                if (losses["depth"] < config["tracking"]["depth_loss_thres"] and losses["edge"] < config["tracking"]["edge_loss_thres"]):
+                    print(f"INFO: Camera Pose of frame {time_idx} Updated, new cam unnorm rots: {candidate_cam_unnorm_rot.detach().cpu()}, new cam trans: {candidate_cam_tran.detach().cpu()}")
+                    with torch.no_grad():
+                        params["cam_unnorm_rots"][..., time_idx] = candidate_cam_unnorm_rot
+                        params["cam_trans"][..., time_idx] = candidate_cam_tran
 
-            # Update the runtime numbers
-            tracking_end_time = time.time()
-            self.tracking_frame_time_sum += tracking_end_time - tracking_start_time
-            self.tracking_frame_time_count += 1
+                # Update the runtime numbers
+                tracking_end_time = time.time()
+                tracking_iter_time =  tracking_end_time - tracking_start_time
+               
+                print(f"INFO: Frame id: {time_idx} Tracking Ends, it takes {tracking_iter_time: .6f}s for {num_iters_tracking} iterations. \n \
+                        \tTracking loss: ")
 
             if (
                 time_idx == 0
@@ -1157,6 +1177,7 @@ class GSRunner:
                         iter_color = self.keyframe_list[selected_rand_keyframe_idx]["color"]
                         iter_depth = self.keyframe_list[selected_rand_keyframe_idx]["depth"]
                         iter_mask = self.keyframe_list[selected_rand_keyframe_idx]["mask"]
+                    #TODO should updated after tracking
                     iter_gt_w2c = self.gt_w2c_all_frames[: iter_time_idx + 1]
                     iter_data = {
                         "cam": self.cam,
