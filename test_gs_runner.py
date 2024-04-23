@@ -174,8 +174,10 @@ def run_gui():
     pcd.points = o3d.utility.Vector3dVector(points)
     pcd.colors = o3d.utility.Vector3dVector(colors)
 
+    # configure the open3d visualizer size
     vis = o3d.visualization.Visualizer()
-    vis.create_window()
+    vis.create_window(width=800, height=600)
+
     vis.add_geometry(pcd)
 
     while 1:

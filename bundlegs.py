@@ -36,7 +36,7 @@ def run_open3d(gui_dict, gui_lock):
     pcd.colors = o3d.utility.Vector3dVector(colors)
 
     vis = o3d.visualization.Visualizer()
-    vis.create_window()
+    vis.create_window(width=800, height=600)
     vis.add_geometry(pcd)
 
     while 1:
@@ -130,6 +130,38 @@ def run_nerf(
     gui_dict,
     debug_dir,
 ):
+    def evaluate_batch_pose_error(poses_gt, poses_est):
+        num_poses = poses_gt.shape[0]
+        
+        translation_errors = np.zeros(num_poses)
+        rotation_errors = np.zeros(num_poses)
+        
+        for i in range(num_poses):
+            pose_gt = poses_gt[i]
+            pose_est = poses_est[i]
+            
+            # Extract translation vectors
+            translation_gt = pose_gt[:3, 3]
+            translation_est = pose_est[:3, 3]
+            
+            # Extract rotation matrices
+            rotation_gt = pose_gt[:3, :3]
+            rotation_est = pose_est[:3, :3]
+            
+            # Calculate translation error
+            translation_error = np.linalg.norm(translation_gt - translation_est)
+            
+            # Calculate rotation error
+            rotation_error_cos = 0.5 * (np.trace(np.dot(rotation_gt.T, rotation_est)) - 1.0)
+            rotation_error_cos = min(1.0, max(-1.0, rotation_error_cos))  # Ensure value is in valid range for arccos
+            rotation_error_rad = np.arccos(rotation_error_cos)
+            rotation_error_deg = np.degrees(rotation_error_rad)
+            
+            translation_errors[i] = translation_error
+            rotation_errors[i] = rotation_error_deg
+        
+        return translation_errors, rotation_errors
+    
     def preprocess_data(rgbs,depths,masks,poses,sc_factor=1.,translation=np.array([0., 0., 0.])):
         '''
         @rgbs: np array (N,H,W,3)
@@ -243,7 +275,7 @@ def run_nerf(
                  np.array(masks),
                  poses=glcam_in_obs)
         
-        print(f'\\\\\\\\\\\\\\\\\\DEBUG: RUN NERF RUNING, cnt_nerf: {cnt_nerf}')
+        #ForkedPdb().set_trace()
         # if cfg_nerf["continual"]:
         #     if cnt_nerf == 0:
         #         if translation is None:
@@ -408,7 +440,12 @@ def run_nerf(
         optimized_cvcam_in_obs = gs_runner.get_optimized_cam_poses()
         optimized_cvcam_in_obs[:,:3, 1:3] *= -1
 
-        #logging.info(f"camera pose updated. \nWas: {cam_in_obs}\nNow:{optimized_cvcam_in_obs}")
+        translation_errors, rotation_errors = evaluate_batch_pose_error(
+            poses,
+            optimized_cvcam_in_obs,
+        )
+        
+        logging.info(f"camera pose updated. \n translation_errors: {translation_errors} \n rotation_errors: {rotation_errors}")
         #ForkedPdb().set_trace()
         #optimized_cvcam_in_obs, offset = get_optimized_poses_in_real_world(
         #    poses,
@@ -426,10 +463,11 @@ def run_nerf(
         #    sc_factor=nerf.cfg["sc_factor"],
         #)
         pointcloud = gs_runner.get_xyz_rgb_params()
-        ForkedPdb().set_trace()
+        #ForkedPdb().set_trace()
 
         with lock:
-            p_dict["optimized_cvcam_in_obs"] = optimized_cvcam_in_obs
+            #if nerf_num_frames > 30:
+            #    p_dict["optimized_cvcam_in_obs"] = optimized_cvcam_in_obs
             p_dict["running"] = False
             # p_dict['nerf_last'] = nerf    #!NOTE not pickable
             p_dict["pointcloud"] = pointcloud

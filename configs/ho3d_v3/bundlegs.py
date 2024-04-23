@@ -9,7 +9,7 @@ seed = 0
 use_gui = True 
 debug_level=2
 
-scene_name = scenes[0]
+scene_name = scenes[4]
 
 map_every = 1
 keyframe_every = 5
@@ -76,7 +76,7 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=1.,
-            depth=1.0,
+            depth=0.,
             edge=1.,
             silhouette=0.
         ),
@@ -99,7 +99,7 @@ config = dict(
         ignore_outlier_depth_loss=False,
         loss_weights=dict(
             im=1.,
-            depth=1.,
+            depth=0.,
             edge=1.,
             silhouette=1.
         ),

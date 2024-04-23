@@ -7,6 +7,7 @@ import time
 import datetime
 from importlib.machinery import SourceFileLoader
 from collections import deque
+from Utils import ForkedPdb
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -186,6 +187,7 @@ class GSRunner:
 
         self._fisrt_c2w = poses[0].copy()
 
+        #ForkedPdb().set_trace()
         poses = self._preprocess_poses(poses)
 
         intrinsics = torch.eye(4).to(self.device)
@@ -216,6 +218,7 @@ class GSRunner:
         self.mapping_frame_time_sum = 0
         self.mapping_frame_time_count = 0
 
+        #self.queued_data_for_train = []
         self.queued_data_for_train = deque()
 
         # prepare data from training
@@ -401,6 +404,7 @@ class GSRunner:
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
 
+        #ForkedPdb().set_trace()
         # get latest poss
         poses = self._preprocess_poses(poses)[-1, ...].unsqueeze(0)
 
@@ -907,12 +911,18 @@ class GSRunner:
                 
         return np.asarray(opt_cam_poses)
 
-    def train(self):
+    def train(self, full=False):
         # TODO pop the earliest data
         config = self.cfg_gs
         params = self.params
         variables = self.variables
+        
+        # if not full:
+        #     data_for_train = self.queued_data_for_train[-1]
+        # else:
+        #     data_for_train = self.queued_data_for_train
 
+        #for curr_data in data_for_train:
         while self.queued_data_for_train:
             curr_data = self.queued_data_for_train.popleft()
             time_idx = curr_data["id"]
@@ -996,7 +1006,7 @@ class GSRunner:
                             if config["use_wandb"]:
                                 report_progress(
                                     params,
-                                    tracking_curr_data,
+                                    curr_data,
                                     tracking_iter + 1,
                                     progress_bar,
                                     time_idx,
@@ -1009,7 +1019,7 @@ class GSRunner:
                             else:
                                 report_progress(
                                     params,
-                                    tracking_curr_data,
+                                    curr_data,
                                     tracking_iter + 1,
                                     progress_bar,
                                     time_idx,
