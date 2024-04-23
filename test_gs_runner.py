@@ -156,6 +156,52 @@ def create_pcd_from_data(rgbs, depths, masks, glcam_in_obs):
     # o3d.visualization.draw_geometries([pcdAll])
     return pcdAll
 
+import threading
+import time
+
+gui_lock = threading.Lock()
+
+gui_dict = {"join": False}
+
+def run_gui():
+
+    # initialize pointcloud
+    num_points = 1000
+    points = np.random.rand(num_points, 3)
+    colors = np.random.rand(num_points, 3)
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+    vis.add_geometry(pcd)
+
+    while 1:
+        with gui_lock:
+            join = gui_dict['join']
+
+            if 'pointcloud' in gui_dict:
+                new_pcd = gui_dict["pointcloud"]
+                del gui_dict["pointcloud"]
+            else:
+                new_pcd = None
+        if join:
+            break
+
+        if new_pcd is not None:
+            pcd.points = o3d.utility.Vector3dVector(new_pcd[:, :3])
+            pcd.colors = o3d.utility.Vector3dVector(new_pcd[:, 3:6])
+
+        time.sleep(0.05)
+        vis.update_geometry(pcd)
+        vis.poll_events()
+        vis.update_renderer()
+
+    visualizer.destroy_window()
+
+
 from importlib.machinery import SourceFileLoader
 import argparse
 
@@ -184,7 +230,9 @@ first_depths = depths[:first_init_num_frames, ...]
 first_masks = masks[:first_init_num_frames, ...]
 first_poses = poses[:first_init_num_frames, ...]
 
-breakpoint()
+
+gui_runner = threading.Thread(target=run_gui,)
+gui_runner.start()
 
 gsRunner = GSRunner(
     cfg,
@@ -197,6 +245,10 @@ gsRunner = GSRunner(
 )
 gsRunner.train()
 
+with gui_lock:
+    gui_dict["pointcloud"] = gsRunner.get_xyz_rgb_params()
+
+
 for i in range(first_init_num_frames, total_num_frames):
     rgb = rgbs[i]
     rgb = rgb.reshape(1, *rgb.shape)
@@ -207,4 +259,9 @@ for i in range(first_init_num_frames, total_num_frames):
     pose = poses[: i + 1, ...]
     gsRunner.add_new_frames(rgb, depth, mask, pose)
     gsRunner.train()
+    with gui_lock:
+        gui_dict["pointcloud"] = gsRunner.get_xyz_rgb_params()
+
+with gui_lock:
+    gui_dict['join'] = True
 

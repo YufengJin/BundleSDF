@@ -4,12 +4,14 @@ from os.path import join as p_join
 primary_device="cuda:0"
 seed = 0
 use_gui = True 
-debug_level=2
+debug_level= 0
 
 scene_name = '000000'
 
+target_object_id = 101
+
 map_every = 1
-keyframe_every = 5
+keyframe_every = 5                 #TODO change different criteria to get keyframe
 mapping_window_size = 24
 tracking_iters = 80 
 mapping_iters = 80
@@ -116,8 +118,8 @@ config = dict(
             remove_big_after=0,
             stop_after=20,
             prune_every=20,
-            removal_opacity_threshold=0.5,
-            final_removal_opacity_threshold=0.5,
+            removal_opacity_threshold=0.2,
+            final_removal_opacity_threshold=0.2,
             reset_opacities=False,
             reset_opacities_every=500, # Doesn't consider iter 0
         ),

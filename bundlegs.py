@@ -25,8 +25,46 @@ try:
 except:
     pass
 
+def run_open3d(gui_dict, gui_lock):
+    # initialize pointcloud
+    num_points = 1000
+    points = np.random.rand(num_points, 3)
+    colors = np.random.rand(num_points, 3)
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+    vis.add_geometry(pcd)
+
+    while 1:
+        with gui_lock:
+            join = gui_dict["join"]
+            if 'pointcloud' in gui_dict:
+                new_pcd = gui_dict["pointcloud"]
+                del gui_dict["pointcloud"]
+            else:
+                new_pcd = None
+        if join:
+            break
+
+        if new_pcd is not None:
+            pcd.points = o3d.utility.Vector3dVector(new_pcd[:, :3])
+            pcd.colors = o3d.utility.Vector3dVector(new_pcd[:, 3:6])
+
+        time.sleep(0.05)
+        vis.update_geometry(pcd)
+        vis.poll_events()
+        vis.update_renderer()
+
+    vis.destroy_window() 
 
 def run_gui(gui_dict, gui_lock):
+
+    #TODO visualize point cloud live in open3d
+    
     print("GUI started")
     with gui_lock:
         gui = BundleSdfGui(img_height=200)
@@ -69,12 +107,12 @@ def run_gui(gui_dict, gui_lock):
                 K=local_dict["K"],
                 n_keyframe=local_dict["n_keyframe"],
             )
-
         local_dict = {}
 
         dpg.render_dearpygui_frame()
         time.sleep(0.03)
-
+    
+    visualizer.destroy_window()
     dpg.destroy_context()
 
 
@@ -181,7 +219,7 @@ def run_nerf(
             time.sleep(0.01)
             continue
 
-        ForkedPdb().set_trace()
+        #ForkedPdb().set_trace()
         cnt_nerf += 1
         rgbs_all += list(rgbs)
         depths_all += list(depths)
@@ -204,7 +242,8 @@ def run_nerf(
                  np.array(depths),
                  np.array(masks),
                  poses=glcam_in_obs)
-         
+        
+        print(f'\\\\\\\\\\\\\\\\\\DEBUG: RUN NERF RUNING, cnt_nerf: {cnt_nerf}')
         # if cfg_nerf["continual"]:
         #     if cnt_nerf == 0:
         #         if translation is None:
@@ -369,8 +408,8 @@ def run_nerf(
         optimized_cvcam_in_obs = gs_runner.get_optimized_cam_poses()
         optimized_cvcam_in_obs[:,:3, 1:3] *= -1
 
-        logging.info(f"camera pose updated. \nWas: {cam_in_obs}\nNow:{optimized_cvcam_in_obs}")
-        ForkedPdb().set_trace()
+        #logging.info(f"camera pose updated. \nWas: {cam_in_obs}\nNow:{optimized_cvcam_in_obs}")
+        #ForkedPdb().set_trace()
         #optimized_cvcam_in_obs, offset = get_optimized_poses_in_real_world(
         #    poses,
         #    nerf.models["pose_array"],
@@ -386,15 +425,18 @@ def run_nerf(
         #    translation=nerf.cfg["translation"],
         #    sc_factor=nerf.cfg["sc_factor"],
         #)
+        pointcloud = gs_runner.get_xyz_rgb_params()
+        ForkedPdb().set_trace()
 
         with lock:
             p_dict["optimized_cvcam_in_obs"] = optimized_cvcam_in_obs
             p_dict["running"] = False
             # p_dict['nerf_last'] = nerf    #!NOTE not pickable
-            #p_dict["mesh"] = mesh
+            p_dict["pointcloud"] = pointcloud
 
         logging.info(f"nerf done at frame {frame_id}")
 
+        # TODO initialize gaussian from pointcloud
         #if cfg_nerf["continual"]:
         #    prev_pcd_real_scale = pcd_all.voxel_down_sample(vox_res)
 
@@ -453,7 +495,13 @@ class BundleGS:
             self.gui_worker = multiprocessing.Process(
                 target=run_gui, args=(self.gui_dict, self.gui_lock)
             )
+            self.o3d_gui_worker = multiprocessing.Process(
+                target=run_open3d, args=(self.gui_dict, self.gui_lock)
+            )
+            self.o3d_gui_worker.start()
             self.gui_worker.start()
+
+
         else:
             self.gui_lock = None
             self.gui_dict = None
@@ -792,7 +840,7 @@ class BundleGS:
                 with self.lock:
                     running = self.p_dict["running"]
                     nerf_num_frames = self.p_dict["nerf_num_frames"]
-                print(f'////////////////Nerf is running :{running}, and nerf_num_frames: {nerf_num_frames}, len(self.bundler._keyframes): {len(self.bundler._keyframes)}')
+                #print(f'////////////////Nerf is running :{running}, and nerf_num_frames: {nerf_num_frames}, len(self.bundler._keyframes): {len(self.bundler._keyframes)}')
                 if not running:
                     break
                 if (
@@ -838,6 +886,10 @@ class BundleGS:
                     if "mesh" in self.p_dict:
                         self.gui_dict["mesh"] = self.p_dict["mesh"]
                         del self.p_dict["mesh"]
+                    
+                    if "pointcloud" in self.p_dict:
+                        self.gui_dict["pointcloud"] = self.p_dict["pointcloud"]
+                        del self.p_dict["pointcloud"]
 
         if rematch_after_nerf:
             if len(frames_large_update) > 0:

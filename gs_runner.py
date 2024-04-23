@@ -259,11 +259,12 @@ class GSRunner:
             - Output: :math:`(L, 4, 4)` where :math:`L` denotes sequence length.
         """
         # opencv c2w to opengl
-        poses[:, :3, 1:3] = -poses[:, :3, 1:3]
-        poses = torch.from_numpy(poses).to(self.device).type(self.dtype)
+        gl_poses = poses.copy()
+        gl_poses[:, :3, 1:3] = -gl_poses[:, :3, 1:3]
+        gl_poses = torch.from_numpy(gl_poses).to(self.device).type(self.dtype)
         return relative_transformation(
-            poses[0].unsqueeze(0).repeat(poses.shape[0], 1, 1),
-            poses,
+            gl_poses[0].unsqueeze(0).repeat(poses.shape[0], 1, 1),
+            gl_poses,
             orthogonal_rotations=False,
         )
 
@@ -395,6 +396,7 @@ class GSRunner:
         return params, variables
 
     def add_new_frames(self, rgbs, depths, masks, poses):
+        # TODO need to redesign the add function
         # new_pcd=pcd_normalized,)
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
@@ -800,18 +802,18 @@ class GSRunner:
 
             plt.show()
 
-        coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-            size=0.5, origin=[0, 0, 0]
-        )
+        #coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        #    size=0.5, origin=[0, 0, 0]
+        #)
 
-        points = params["means3D"].detach().cpu().numpy().copy()
-        colors = params["rgb_colors"].detach().cpu().numpy().copy()
-        # Create a point cloud object
-        pcl_prev = o3d.geometry.PointCloud()
+        #points = params["means3D"].detach().cpu().numpy().copy()
+        #colors = params["rgb_colors"].detach().cpu().numpy().copy()
+        ## Create a point cloud object
+        #pcl_prev = o3d.geometry.PointCloud()
 
-        # Set the point cloud data
-        pcl_prev.points = o3d.utility.Vector3dVector(points)
-        pcl_prev.colors = o3d.utility.Vector3dVector(colors)
+        ## Set the point cloud data
+        #pcl_prev.points = o3d.utility.Vector3dVector(points)
+        #pcl_prev.colors = o3d.utility.Vector3dVector(colors)
 
         # Get the new frame Gaussians based on the Silhouette
         if torch.sum(non_presence_mask) > 0:
@@ -854,20 +856,20 @@ class GSRunner:
                 (variables["timestep"], new_timestep), dim=0
             )
 
-        try:
-            points = new_params["means3D"].detach().cpu().numpy().copy()
-            colors = new_params["rgb_colors"].detach().cpu().numpy().copy()
-            # Create a point cloud object
-            pcl = o3d.geometry.PointCloud()
+        #try:
+        #    points = new_params["means3D"].detach().cpu().numpy().copy()
+        #    colors = new_params["rgb_colors"].detach().cpu().numpy().copy()
+        #    # Create a point cloud object
+        #    pcl = o3d.geometry.PointCloud()
 
-            # Set the point cloud data
-            pcl.points = o3d.utility.Vector3dVector(points)
-            pcl.colors = o3d.utility.Vector3dVector(colors)
+        #    # Set the point cloud data
+        #    pcl.points = o3d.utility.Vector3dVector(points)
+        #    pcl.colors = o3d.utility.Vector3dVector(colors)
 
-            # Visualize the point cloud
-            # o3d.visualization.draw([coordinate_frame, pcl_prev, pcl])
-        except:
-            print("Visualization of points fails")
+        #    # Visualize the point cloud
+        #    o3d.visualization.draw([coordinate_frame, pcl_prev, pcl])
+        #except:
+        #    print("Visualization of points fails")
 
     @staticmethod
     def initialize_optimizer(params, lrs_dict, tracking):
@@ -879,6 +881,14 @@ class GSRunner:
             return torch.optim.Adam(param_groups)
         else:
             return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
+
+    def get_xyz_rgb_params(self):
+        points = self.params["means3D"].detach().cpu().numpy()
+        colors = self.params["rgb_colors"].detach().cpu().numpy()
+        center = points.mean(axis=0)
+        points = points - center
+        # Create a point cloud object
+        return np.concatenate((points, colors), axis=1)
 
     def get_optimized_cam_poses(self):
         opt_cam_poses = []
