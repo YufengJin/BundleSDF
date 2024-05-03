@@ -192,7 +192,7 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 
 # load from bop dataset
 #dataRootDir = '/home/datasets/BOP/ycbv/train_pbr/000000/'
-dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_output/bop_data/ycbv/train_pbr/000000'
+dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_outputs/bop_data/ycbv/train_pbr/000000'
 target_object_id = 11 
 
 cameraInfo = json.load(open(dataRootDir + '/scene_camera.json', 'r'))
@@ -218,7 +218,7 @@ load_stop = False
 
 frame_id = 0
 
-noise = 0.005
+noise = 0.01
 for imgIdx, content in scene_gt.items():
     if load_stop:
         break
@@ -344,8 +344,6 @@ first_c2w[:3, 1:3] *= -1
 obj_init_pose = np.linalg.inv(first_c2w)
 
 pcd.transform(obj_init_pose)
-# TODO create octree from pcd and resample colored pointcloud from voxel presentation
-
 # transit open3d pointcloud to numpy array
 pcl = np.asarray(pcd.points)
 pcl = np.concatenate([pcl, np.asarray(pcd.colors)], axis=1)
@@ -356,6 +354,15 @@ gui_dict = {"join": False}
 gui_runner = threading.Thread(target=run_gui, args=(gui_lock, gui_dict))
 #gui_runner.start()
 
+import wandb
+wandb_run = wandb.init(
+    # Set the project where this run will be logged
+    project="BundleGS",
+    # Track hyperparameters and run metadata
+    settings=wandb.Settings(start_method="fork"),
+    mode='online'   #"disabled"
+)
+
 gsRunner = GSRunner(
     cfg,
     rgbs=first_rgbs,
@@ -365,9 +372,11 @@ gsRunner = GSRunner(
     poses=first_poses,
     total_num_frames=total_num_frames,
     pointcloud=pcl,
+    wandb_run=wandb_run,
 )
-gsRunner.train_once()
+gsRunner.train()
 
+1/0
 
 with gui_lock:
     gui_dict["pointcloud"] = gsRunner.get_xyz_rgb_params()

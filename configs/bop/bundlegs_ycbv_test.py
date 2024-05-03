@@ -44,6 +44,27 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=False,
+    train=dict(
+        num_epochs=100,
+        batch_size=10,
+        batch_iters=20,
+        sil_thres=0.9,
+        lrs=dict(
+            means3D=0.0001,
+            rgb_colors=0.0025,
+            unnorm_rotations=0.001,
+            logit_opacities=0.05,
+            log_scales=0.001,
+            cam_unnorm_rots=0.001,
+            cam_trans=0.001,
+        ),
+        loss_weights=dict(
+            im=1.,
+            depth=1.0,
+            edge=1.,
+            silhouette=1.
+        )
+    ),
     wandb=dict(
         #entity="theairlab",
         project="SplaTAM",

@@ -5,6 +5,7 @@ import shutil
 import sys
 import time
 import datetime
+import random
 from importlib.machinery import SourceFileLoader
 from collections import deque
 #from Utils import ForkedPdb
@@ -46,34 +47,55 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
 # TODO 2. add keyframe selection
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
-VIS_LOSS_IMAGE = False 
+VIS_LOSS_IMAGE = True
+
+def visualize_camera_poses(c2ws):
+    if isinstance(c2ws, torch.Tensor):
+        c2ws = c2ws.detach().cpu().numpy()
+    assert c2ws.shape[1:] == (4, 4) and len(c2ws.shape) == 3
+    # Visualize World Coordinate Frame
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.)
+    camFrames = o3d.geometry.TriangleMesh()
+    for c2w in c2ws:
+        cam_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        cam_frame.transform(c2w)
+        camFrames += cam_frame
+        
+    o3d.visualization.draw_geometries([world_frame, camFrames])
 
 def visualize_param_info(params):
-    # Get the color map by name:
-    cm = plt.get_cmap("gist_rainbow")  # purple high, red small
-
-    points = params["means3D"].detach().cpu().numpy()
-    colors = params["rgb_colors"].detach().cpu().numpy()
-
-    opacities = params["logit_opacities"].detach().squeeze(1).cpu().numpy()
-    # exp
-    opacities = np.exp(opacities)
-    opa_colors = cm(opacities)
-
     pcl = o3d.geometry.PointCloud()
-
-    # Set the point cloud data
+    points = params["means3D"].detach().cpu().numpy()
     pcl.points = o3d.utility.Vector3dVector(points)
-    pcl.colors = o3d.utility.Vector3dVector(colors)
 
-    pcl_opa = o3d.geometry.PointCloud()
+    if "rgb_colors" in params:
+        colors = params["rgb_colors"].detach().cpu().numpy()
+        pcl.colors = o3d.utility.Vector3dVector(colors)
 
-    # Set the point cloud data
-    pcl_opa.points = o3d.utility.Vector3dVector(points)
-    pcl_opa.colors = o3d.utility.Vector3dVector(opa_colors[..., :3])
 
+    if "logit_opacities" in params:
+        # Get the color map by name:
+        cm = plt.get_cmap("gist_rainbow")  # purple high, red small
+
+        opacities = params["logit_opacities"].detach().squeeze(1).cpu().numpy()
+        # exp
+        opacities = np.exp(opacities)
+        opa_colors = cm(opacities)
+
+        pcl_opa = o3d.geometry.PointCloud()
+
+        # Set the point cloud data
+        pcl_opa.points = o3d.utility.Vector3dVector(points)
+        pcl_opa.colors = o3d.utility.Vector3dVector(opa_colors[..., :3])
+
+    else:
+        pcl_opa = None
+    
     world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
-    o3d.visualization.draw([world_frame, pcl, pcl_opa])
+    if pcl_opa is not None:
+        o3d.visualization.draw([world_frame, pcl, pcl_opa])
+    else:
+        o3d.visualization.draw([world_frame, pcl])
 
 
 def get_img_from_fig(fig, dpi=180):
@@ -201,10 +223,19 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     return params
 
 
+def initialize_optimizer_sep(params, lrs_dict, tracking):
+    lrs = lrs_dict
+    param_groups = [
+        {"params": [v], "name": k, "lr": lrs[k]} for k, v in params.items()
+    ]
+    if tracking:
+        return torch.optim.Adam(param_groups)
+    else:
+        return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 class GSRunner:
     def __init__(
-        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None):
+        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, wandb_run=None):
         # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
         # TODO check poses c2w or obs_in_cam, z axis
         # preprocess data -> to tensor
@@ -227,7 +258,7 @@ class GSRunner:
         intrinsics[:3, :3] = torch.tensor(K)
 
         first_data = (colors[0], depths[0], masks[0], intrinsics, poses[0])
-
+        
         # intialize pointcloud if provided
         if pointcloud is not None:
             assert isinstance(pointcloud, np.ndarray) and pointcloud.shape[1] == 6
@@ -265,8 +296,8 @@ class GSRunner:
         self.mapping_frame_time_count = 0
 
             
-        #self.queued_data_for_train = []
-        self.queued_data_for_train = deque()
+        self.queued_data_for_train = []
+        #self.queued_data_for_train = deque()
 
         # prepare data from training
         for color, depth, mask, pose in zip(colors, depths, masks, poses):
@@ -287,8 +318,10 @@ class GSRunner:
                     "mask": mask,
                     "id": iter_time_idx,
                     "intrinsics": self.intrinsics,
-                    "w2c": self.first_frame_w2c,
+                    "w2c": w2c,
+                    "first_c2w": self.first_frame_w2c,
                     "iter_gt_w2c_list": self.gt_w2c_all_frames.copy(),
+                    "optimized": False
                 }
             )
             self.curr_frame_id += 1
@@ -317,10 +350,9 @@ class GSRunner:
             gl_poses,
             orthogonal_rotations=False,
         )
-        # offset = gl_poses[0][:3, 3]
-        # gl_pose_ret[:, :3, 3] = (
-        #     gl_pose_ret[:, :3, 3] + offset
-        # )
+        # first_c2w = gl_poses[0].unsqueeze(0)
+        # gl_pose_ret = torch.matmul(first_c2w, gl_pose_ret)
+         
         return gl_pose_ret
     
     def _preprocess_images_data(self, colors, depths, masks):
@@ -479,14 +511,16 @@ class GSRunner:
 
             self.queued_data_for_train.append(
                 {
-                    "cam": self.cam,
+                    "cam": self.cam,          # TODO remove it from dict
                     "im": color,
                     "depth": depth,
                     "mask": mask,
                     "id": iter_time_idx,
                     "intrinsics": self.intrinsics,
-                    "w2c": self.first_frame_w2c,
-                    "iter_gt_w2c_list": self.gt_w2c_all_frames.copy()
+                    "w2c": w2c,
+                    "first_c2w": self.first_frame_w2c,
+                    "iter_gt_w2c_list": self.gt_w2c_all_frames.copy(),      # only for trajectory prediction
+                    "optimized": False
                 }
             )
             self.curr_frame_id += 1
@@ -938,16 +972,13 @@ class GSRunner:
         # except:
         #    print("Visualization of points fails")
 
-    @staticmethod
-    def initialize_optimizer(params, lrs_dict, tracking):
-        lrs = lrs_dict
+ 
+    def initialize_optimizer(self, lr_dict):
+        lrs = lr_dict
         param_groups = [
-            {"params": [v], "name": k, "lr": lrs[k]} for k, v in params.items()
+            {"params": [v], "name": k, "lr": lrs[k]} for k, v in self.params.items()
         ]
-        if tracking:
-            return torch.optim.Adam(param_groups)
-        else:
-            return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
+        return torch.optim.Adam(param_groups)
 
     def get_xyz_rgb_params(self):
         points = self.params["means3D"].detach().cpu().numpy()
@@ -976,9 +1007,267 @@ class GSRunner:
 
     def train(self):
         # TODO N-iter training, set batch and update optimizer once per batch
-        pass 
+        batch_size = self.cfg_gs['train']["batch_size"]
+        lr_dict = self.cfg_gs['train']["lrs"]
+        batch_iters = self.cfg_gs['train']["batch_iters"]
+        progress_bar = tqdm(total=self.cfg_gs['train']["num_epochs"])
+        # intialize optimizer
+        for epoch in range(self.cfg_gs['train']["num_epochs"]):
+            if len(self.queued_data_for_train) < batch_size:
+                indices = list(range(len(self.queued_data_for_train)))
+                random.shuffle(indices)
 
-    def train_once(self):
+                # shuffle the data
+                batch_data = [self.queued_data_for_train[i] for i in indices]
+            else:
+                indices = list(range(batch_size))
+                random.shuffle(indices)
+                # random sample batch_size data
+                batch_data = [self.queued_data_for_train[i] for i in indices]
+            
+            # update camera rotation and translation in params 
+            with torch.no_grad():
+                for curr_data in batch_data:
+                    time_idx = curr_data["id"]
+                    rel_w2c = curr_data["w2c"]
+                    if time_idx > 0:
+                        # update initial pose relative to frame 0
+                        rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
+                        rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
+                        rel_w2c_tran = rel_w2c[:3, 3].detach()
+                        # Update the camera parameters
+                        self.params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
+                        self.params["cam_trans"][..., time_idx] = rel_w2c_tran
+
+            optimizer = self.initialize_optimizer(lr_dict)
+            for iter in range(batch_iters):
+                loss, losses = self.train_once(batch_data, iter)
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+
+                wandb.log(losses)
+
+            progress_bar.update(1)
+                # prune gaussians
+
+                # denseify gaussians
+
+    def train_once(self, batch_data, training_iter, dssim_weight=0.2):
+        losses = {k: torch.tensor(0.0).to(self.device) for k in ["edge", "depth", "silhouette", "im"]}
+
+        for curr_data in batch_data:
+            iter_time_idx = curr_data["id"]
+            
+            # transform the gaussians to the current frame
+            transformed_gaussians = transform_to_frame(
+                self.params, iter_time_idx, gaussians_grad=True, camera_grad=True
+            )
+
+            # Initialize Render Variables
+            rendervar = transformed_params2rendervar(self.params, transformed_gaussians)
+            depth_sil_rendervar = transformed_params2depthplussilhouette(
+                self.params, curr_data["first_c2w"], transformed_gaussians
+            )
+            # RGB Rendering
+            rendervar["means2D"].retain_grad()
+            (
+                im,
+                radius,
+                _,
+            ) = Renderer(
+                raster_settings=self.cam
+            )(**rendervar)
+            self.variables["means2D"] = rendervar[
+                "means2D"
+            ]  # Gradient only accum from colour render for densification
+
+            # Depth & Silhouette Rendering
+            (
+                depth_sil,
+                _,
+                _,
+            ) = Renderer(
+                raster_settings=self.cam
+            )(**depth_sil_rendervar)
+
+            depth = depth_sil[0, :, :].unsqueeze(0)
+            silhouette = depth_sil[1, :, :]
+            presence_sil_mask = silhouette > self.cfg_gs["train"]["sil_thres"]
+            depth_sq = depth_sil[2, :, :].unsqueeze(0)
+            uncertainty = depth_sq - depth**2
+            uncertainty = uncertainty.detach()
+            # M    ask with valid depth values (accounts for outlier depth values)
+            nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
+
+            mask_gt = curr_data["mask"].bool()
+            gt_im = curr_data["im"] * mask_gt
+
+            mask = mask_gt | presence_sil_mask & nan_mask
+
+            # canny edge detection
+            gt_gray = ki.color.rgb_to_grayscale(curr_data["im"].unsqueeze(0))
+
+            # sobel edges
+            gt_edge = ki.filters.sobel(gt_gray).squeeze(0)
+            # canny edges
+            # gt_edge= ki.filters.canny(gt_gray)[0]
+
+            gray = ki.color.rgb_to_grayscale(im.unsqueeze(0))
+
+            # sobel edges
+            edge = ki.filters.sobel(gray).squeeze(0)
+            # edge edges
+
+            losses["edge"] += torch.abs(gt_edge - edge)[mask].mean()
+
+            # Depth loss
+            losses["depth"] += torch.abs(curr_data["depth"] - depth)[mask].mean()
+
+            # silhouette loss
+            losses["silhouette"] += torch.abs(silhouette.float() - curr_data["mask"]).mean()
+
+            # color loss
+            color_mask = torch.tile(mask, (3, 1, 1))
+            color_mask = color_mask.detach()
+
+            rgbl1 = torch.abs(gt_im - im)[color_mask].mean()
+            losses["im"] += (1-dssim_weight) * rgbl1 + dssim_weight * (1.0 - calc_ssim(im, gt_im))
+
+            # visualize debugging images
+            if VIS_LOSS_IMAGE and (training_iter) % 5 == 0:
+                # define a function which returns an image as numpy array from figure
+                fig, ax = plt.subplots(4, 4, figsize=(12, 12))
+                weighted_render_im = im * color_mask
+                weighted_im = curr_data["im"] * color_mask
+                weighted_render_depth = depth * mask
+                weighted_depth = curr_data["depth"] * mask
+                weighted_render_candy = (edge * mask)
+                weighted_candy = (gt_edge * mask)
+                viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
+
+                diff_rgb = (
+                    torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
+                )
+                diff_depth = (
+                    torch.abs(weighted_render_depth - weighted_depth)
+                    .mean(dim=0)
+                    .detach()
+                    .cpu()
+                )
+                diff_candy = (
+                    torch.abs(weighted_render_candy - weighted_candy)
+                    .mean(dim=0)
+                    .detach()
+                    .cpu()
+                )
+                diff_sil = (
+                    torch.abs(presence_sil_mask.float() - curr_data["mask"])
+                    .squeeze(0)
+                    .detach()
+                    .cpu()
+                )
+                ax[0, 0].imshow(viz_img)
+                ax[0, 0].set_title("Weighted GT RGB")
+                viz_render_img = torch.clip(
+                    weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1
+                )
+                ax[1, 0].imshow(viz_render_img)
+                ax[1, 0].set_title("Weighted Rendered RGB")
+                ax_im = ax[0, 1].imshow(weighted_depth[0].detach().cpu())
+                cbar = fig.colorbar(ax_im, ax=ax[0, 1])
+                ax[0, 1].set_title("Weighted GT Depth")
+                ax[1, 1].imshow(
+                    weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6
+                )
+                ax[1, 1].set_title("Weighted Rendered Depth")
+                ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
+                ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
+                ax_im = ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
+                cbar = fig.colorbar(ax_im, ax=ax[1, 2])
+                ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
+                ax_im = ax[0, 3].imshow(silhouette.detach().squeeze().cpu())
+                cbar = fig.colorbar(ax_im, ax=ax[0, 3])
+                ax[0, 3].set_title("Silhouette Mask")
+                ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
+                ax[1, 3].set_title("Loss Mask")
+                ax[2, 0].imshow(curr_data["mask"].detach().squeeze().cpu())
+                ax[2, 0].set_title("gt Mask")
+                ax_im = ax[2, 1].imshow(depth_sq.detach().squeeze().cpu())
+                # Add colorbar
+                cbar = fig.colorbar(ax_im, ax=ax[2, 1])
+                ax[2, 1].set_title("uncertainty mask")
+                ax[2, 2].imshow(
+                    (im.permute(1, 2, 0).detach().squeeze().cpu().numpy() * 255).astype(
+                        np.uint8
+                    )
+                )
+                ax[2, 2].set_title("Rendered RGB")
+                ax[2, 3].imshow(gt_im.permute(1, 2, 0).detach().squeeze().cpu())
+                ax[2, 3].set_title("GT RGB")
+                ax[3, 0].imshow(
+                    torch.clamp(
+                        weighted_candy.permute(1, 2, 0).detach().squeeze().cpu(), 0.0, 1.0
+                    ),
+                    cmap="jet",
+                )
+                ax[3, 0].set_title("Weighted GT canny")
+                # A3d colorbar
+                ax[3, 1].imshow(
+                    torch.clamp(
+                        weighted_render_candy.permute(1, 2, 0).detach().squeeze().cpu(),
+                        0.0,
+                        1.0,
+                    ),
+                    cmap="jet",
+                )
+                ax[3, 1].set_title("Weighted rendered canny")
+                ax[3, 2].imshow(
+                    torch.clamp(diff_candy.detach().squeeze().cpu(), 0.0, 1.0), cmap="jet"
+                )
+                ax[3, 2].set_title(f"Diff Edge: {torch.round(losses['edge'])}")
+                ax[3, 3].imshow(diff_sil, cmap="jet")
+                ax[3, 3].set_title(f"Silhouette Loss: {float(losses['silhouette'])}")
+                # Turn off axis
+                for i in range(2):
+                    for j in range(4):
+                        ax[i, j].axis("off")
+                # Set Title
+                suptitle = f"frame_id: {curr_data['id']}, Training Iteration: {training_iter}"
+                fig.suptitle(suptitle, fontsize=16)
+                # Figure Tight Layout
+                fig.tight_layout()
+                plot_dir = "/home/yjin/repos/BundleSDF/gs_debug_imgs"
+                os.makedirs(plot_dir, exist_ok=True)
+                current_time = datetime.datetime.now()
+                filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
+                #plt.show()
+                plt.savefig(
+                    os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
+                )
+                plt.close()
+                
+                seen = radius > 0
+                self.variables["max_2D_radius"][seen] = torch.max(
+                    radius[seen], self.variables["max_2D_radius"][seen]
+                )
+                self.variables["seen"] = seen
+
+        loss_weights = self.cfg_gs["train"]["loss_weights"]
+        weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
+
+        loss = sum(weighted_losses.values())
+
+        weighted_losses['loss'] = loss
+
+        # convert to numpy
+        for k, v in weighted_losses.items():
+            weighted_losses[k] = v.item()
+    
+        return loss, weighted_losses
+         
+
+    def train_together(self):
         # TODO pop the earliest data
         config = self.cfg_gs
         params = self.params
@@ -1011,7 +1300,7 @@ class GSRunner:
                 tracking_start_time = time.time()
 
                 # reset optimizer & learning rates for tracking
-                optimizer = self.initialize_optimizer(
+                optimizer = initialize_optimizer_sep(
                     params, config["tracking"]["lrs"], tracking=True
                 )
                 # keep track of best candidate rotation & translation
@@ -1233,7 +1522,7 @@ class GSRunner:
                     )
 
                 # Reset Optimizer & Learning Rates for Full Map Optimization
-                optimizer = self.initialize_optimizer(
+                optimizer = initialize_optimizer_sep(
                     params, config["mapping"]["lrs"], tracking=False
                 )
 
