@@ -7,7 +7,7 @@ import time
 import datetime
 from importlib.machinery import SourceFileLoader
 from collections import deque
-from Utils import ForkedPdb
+#from Utils import ForkedPdb
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,7 +43,38 @@ from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, dens
 
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
+# TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
+# TODO 2. add keyframe selection
+# TODO 3. evaluate the error of camera pose optimization on gt_pose
 VIS_LOSS_IMAGE = False 
+
+def visualize_param_info(params):
+    # Get the color map by name:
+    cm = plt.get_cmap("gist_rainbow")  # purple high, red small
+
+    points = params["means3D"].detach().cpu().numpy()
+    colors = params["rgb_colors"].detach().cpu().numpy()
+
+    opacities = params["logit_opacities"].detach().squeeze(1).cpu().numpy()
+    # exp
+    opacities = np.exp(opacities)
+    opa_colors = cm(opacities)
+
+    pcl = o3d.geometry.PointCloud()
+
+    # Set the point cloud data
+    pcl.points = o3d.utility.Vector3dVector(points)
+    pcl.colors = o3d.utility.Vector3dVector(colors)
+
+    pcl_opa = o3d.geometry.PointCloud()
+
+    # Set the point cloud data
+    pcl_opa.points = o3d.utility.Vector3dVector(points)
+    pcl_opa.colors = o3d.utility.Vector3dVector(opa_colors[..., :3])
+
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+    o3d.visualization.draw([world_frame, pcl, pcl_opa])
+
 
 def get_img_from_fig(fig, dpi=180):
     buf = io.BytesIO()
@@ -173,8 +204,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
 
 class GSRunner:
     def __init__(
-        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float
-    ):
+        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None):
         # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
         # TODO check poses c2w or obs_in_cam, z axis
         # preprocess data -> to tensor
@@ -182,6 +212,9 @@ class GSRunner:
         self.dtype = dtype
         self._total_num_frames = total_num_frames
         self.cfg_gs = cfg_gs
+
+        self._offset = offset
+        self._scale = scale
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
 
@@ -195,13 +228,26 @@ class GSRunner:
 
         first_data = (colors[0], depths[0], masks[0], intrinsics, poses[0])
 
-        self._initialize_first_timestep(
-            first_data,
-            total_num_frames,
-            cfg_gs["scene_radius_depth_ratio"],
-            cfg_gs["mean_sq_dist_method"],
-            gaussian_distribution=cfg_gs["gaussian_distribution"],
-        )
+        # intialize pointcloud if provided
+        if pointcloud is not None:
+            assert isinstance(pointcloud, np.ndarray) and pointcloud.shape[1] == 6
+            
+            self._initialize_first_timestep(
+                first_data,
+                total_num_frames,
+                cfg_gs["scene_radius_depth_ratio"],
+                cfg_gs["mean_sq_dist_method"],
+                gaussian_distribution=cfg_gs["gaussian_distribution"],
+                pointcloud=pointcloud,
+            )
+        else:
+            self._initialize_first_timestep(
+                first_data,
+                total_num_frames,
+                cfg_gs["scene_radius_depth_ratio"],
+                cfg_gs["mean_sq_dist_method"],
+                gaussian_distribution=cfg_gs["gaussian_distribution"],
+            )
         # Initialize list to keep track of Keyframes
         self.keyframe_list = []
         self.keyframe_time_indices = []
@@ -218,6 +264,7 @@ class GSRunner:
         self.mapping_frame_time_sum = 0
         self.mapping_frame_time_count = 0
 
+            
         #self.queued_data_for_train = []
         self.queued_data_for_train = deque()
 
@@ -265,12 +312,17 @@ class GSRunner:
         gl_poses = poses.copy()
         gl_poses[:, :3, 1:3] = -gl_poses[:, :3, 1:3]
         gl_poses = torch.from_numpy(gl_poses).to(self.device).type(self.dtype)
-        return relative_transformation(
+        gl_pose_ret = relative_transformation(
             gl_poses[0].unsqueeze(0).repeat(poses.shape[0], 1, 1),
             gl_poses,
             orthogonal_rotations=False,
         )
-
+        # offset = gl_poses[0][:3, 3]
+        # gl_pose_ret[:, :3, 3] = (
+        #     gl_pose_ret[:, :3, 3] + offset
+        # )
+        return gl_pose_ret
+    
     def _preprocess_images_data(self, colors, depths, masks):
         assert len(colors.shape) == len(depths.shape) == len(masks.shape) == 4
         # from B,H,W,C -> B,C,W,H
@@ -298,6 +350,7 @@ class GSRunner:
         scene_radius_depth_ratio,
         mean_sq_dist_method,
         gaussian_distribution=None,
+        pointcloud=None,        
     ):
         color, depth, mask, intrinsics, pose = first_data
 
@@ -322,21 +375,28 @@ class GSRunner:
         mask_ = (depth > 0) & mask.bool()  # Mask out invalid depth values
         mask = mask.reshape(-1)
 
-        init_pt_cld, mean3_sq_dist = get_pointcloud(
-            color,
-            depth,
-            mask,
-            intrinsics,
-            w2c,
-            compute_mean_sq_dist=True,
-            mean_sq_dist_method=mean_sq_dist_method,
-        )
+        if pointcloud is not None:
+            init_pt_cld = torch.from_numpy(pointcloud).to(self.device).type(self.dtype)
+            depth_z = init_pt_cld[:, 2]
+            mean3_sq_dist = depth_z / ((intrinsics[0, 0] + intrinsics[1, 1]) / 2)
+            mean3_sq_dist = mean3_sq_dist**2
+
+        else:
+            init_pt_cld, mean3_sq_dist = get_pointcloud(
+                color,
+                depth,
+                mask,
+                intrinsics,
+                w2c,
+                compute_mean_sq_dist=True,
+                mean_sq_dist_method=mean_sq_dist_method,
+            )
 
         params, variables = self._initialize_params(
             init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution
         )
 
-        # Initialize an estimate of scene radius for Gaussian-Splatting Densification
+        # Initialize an estimate of scene radius for Gaussian-Splatting Densification, TODO understanding variables scene_radius
         variables["scene_radius"] = torch.max(depth) / scene_radius_depth_ratio
 
         self.params = params
@@ -735,8 +795,9 @@ class GSRunner:
 
     @staticmethod
     def add_new_gaussians(
-        params, variables, curr_data, sil_thres, time_idx, mean_sq_dist_method, gaussian_distribution
+        params, variables, curr_data, sil_thres, depth_thres, time_idx, mean_sq_dist_method, gaussian_distribution
     ):
+        # add new gaussians with non-presence mask
         # Silhouette Rendering
         transformed_gaussians = transform_to_frame(
             params, time_idx, gaussians_grad=False, camera_grad=False
@@ -754,19 +815,23 @@ class GSRunner:
         )(**depth_sil_rendervar)
         silhouette = depth_sil[1, :, :]
         non_presence_sil_mask = silhouette < sil_thres
+        
         # Check for new foreground objects by using GT depth
         gt_mask = curr_data["mask"][0, :, :]
         gt_depth = curr_data["depth"][0, :, :]
+        # remove nan in depth
+        gt_depth = torch.nan_to_num_(gt_depth, nan=0.0)
         render_depth = depth_sil[0, :, :]
+
         mask = gt_mask.bool() & (gt_depth > 0)
+        # Filter out invalid depth values, remove nan in depth
 
-        gt_depth = gt_depth * mask
-        # filter out outlier
-
-        depth_error = torch.abs(gt_depth - render_depth) * mask
-        non_presence_depth_mask = render_depth < gt_depth
+        non_presence_depth_mask = (render_depth-gt_depth) > depth_thres
         # Determine non-presence mask
-        non_presence_mask = non_presence_depth_mask.bool() & mask
+        non_presence_mask = non_presence_sil_mask & mask
+        
+        # TODO how to use non_presence_depth_mask
+        #non_presence_mask = non_presence_mask | non_presence_depth_mask
         # Flatten mask
         non_presence_mask = non_presence_mask.reshape(-1)
         # TODO add new gaussian
@@ -775,7 +840,7 @@ class GSRunner:
             plt.imshow(silhouette.detach().cpu().numpy())
             plt.title("silhouette")
             plt.subplot(2, 4, 2)
-            plt.imshow(curr_data["mask"].squeeze().cpu().numpy())
+            plt.imshow(mask.squeeze().cpu().numpy())
             plt.title("gt_mask")
             plt.subplot(2, 4, 3)
             plt.imshow(gt_depth.detach().cpu().numpy())
@@ -792,9 +857,9 @@ class GSRunner:
             plt.colorbar()
             plt.title("depth_loss")
             plt.subplot(2, 4, 6)
-            plt.imshow(depth_error.detach().cpu().numpy())
+            plt.imshow(non_presence_mask.detach().cpu().numpy().reshape(*mask.shape))
             plt.colorbar()
-            plt.title("masked depth loss")
+            plt.title("non presence mask")
             plt.subplot(2, 4, 7)
             plt.imshow(non_presence_depth_mask.detach().cpu().numpy())
             plt.colorbar()
@@ -806,18 +871,18 @@ class GSRunner:
 
             plt.show()
 
-        #coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+        # coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
         #    size=0.5, origin=[0, 0, 0]
-        #)
+        # )
 
-        #points = params["means3D"].detach().cpu().numpy().copy()
-        #colors = params["rgb_colors"].detach().cpu().numpy().copy()
-        ## Create a point cloud object
-        #pcl_prev = o3d.geometry.PointCloud()
+        # points = params["means3D"].detach().cpu().numpy().copy()
+        # colors = params["rgb_colors"].detach().cpu().numpy().copy()
+        # # Create a point cloud object
+        # pcl_prev = o3d.geometry.PointCloud()
 
-        ## Set the point cloud data
-        #pcl_prev.points = o3d.utility.Vector3dVector(points)
-        #pcl_prev.colors = o3d.utility.Vector3dVector(colors)
+        # # Set the point cloud data
+        # pcl_prev.points = o3d.utility.Vector3dVector(points)
+        # pcl_prev.colors = o3d.utility.Vector3dVector(colors)
 
         # Get the new frame Gaussians based on the Silhouette
         if torch.sum(non_presence_mask) > 0:
@@ -829,8 +894,6 @@ class GSRunner:
             curr_w2c = torch.eye(4).cuda().float()
             curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
             curr_w2c[:3, 3] = curr_cam_tran
-            valid_depth_mask = curr_data["depth"][0, :, :] > 0
-            non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
             new_pt_cld, mean3_sq_dist = get_pointcloud(
                 curr_data["im"],
                 curr_data["depth"],
@@ -860,7 +923,7 @@ class GSRunner:
                 (variables["timestep"], new_timestep), dim=0
             )
 
-        #try:
+        # try:
         #    points = new_params["means3D"].detach().cpu().numpy().copy()
         #    colors = new_params["rgb_colors"].detach().cpu().numpy().copy()
         #    # Create a point cloud object
@@ -872,7 +935,7 @@ class GSRunner:
 
         #    # Visualize the point cloud
         #    o3d.visualization.draw([coordinate_frame, pcl_prev, pcl])
-        #except:
+        # except:
         #    print("Visualization of points fails")
 
     @staticmethod
@@ -911,16 +974,15 @@ class GSRunner:
                 
         return np.asarray(opt_cam_poses)
 
-    def train(self, full=False):
+    def train(self):
+        # TODO N-iter training, set batch and update optimizer once per batch
+        pass 
+
+    def train_once(self):
         # TODO pop the earliest data
         config = self.cfg_gs
         params = self.params
         variables = self.variables
-        
-        # if not full:
-        #     data_for_train = self.queued_data_for_train[-1]
-        # else:
-        #     data_for_train = self.queued_data_for_train
 
         #for curr_data in data_for_train:
         while self.queued_data_for_train:
@@ -1125,6 +1187,7 @@ class GSRunner:
                         variables,
                         curr_data,
                         config["mapping"]["sil_thres"],
+                        config["mapping"]["depth_thres"],
                         time_idx,
                         config["mean_sq_dist_method"],
                         config["gaussian_distribution"],

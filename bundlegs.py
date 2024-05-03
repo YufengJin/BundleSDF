@@ -434,7 +434,7 @@ def run_nerf(
             )
 
         logging.info(f"Start training, latest nerf frame {frame_id}")
-        gs_runner.train()
+        gs_runner.train_once()
         logging.info(f"Training done, latest nerf frame {frame_id}")
 
         optimized_cvcam_in_obs = gs_runner.get_optimized_cam_poses()

@@ -97,18 +97,18 @@ class BOPDataset(GradSLAMDataset):
                         print("ERROR: obj {int(self.target_object_id)} occurs twices")
                         raise 
                     # object 6D Pose
-                    c2w = np.eye(4)
+                    obj_in_cam = np.eye(4)
                     R = np.array(obj_info['cam_R_m2c']).reshape(3,3)
                     t = np.array(obj_info['cam_t_m2c'])
-                    c2w[:3, :3] = R
-                    c2w[:3, 3] = t
-                    c2w[:3, 3] /= 1000. 
+                    obj_in_cam[:3, :3] = R
+                    obj_in_cam[:3, 3] = t
+                    obj_in_cam[:3, 3] /= 1000. 
 
                     #c2w = np.linalg.inv(c2w)
                     ##c2w[:3, 1:3] = -c2w[:3,1:3]
                     #c2w[:3, 3] /= 1000. 
                     #c2w = torch.from_numpy(c2w).float()
-                    poses.append(c2w)
+                    poses.append(obj_in_cam)
 
                     # update masks
                     self._mask_paths.append(os.path.join(self.input_folder, "mask", f"{int(imIdx):06d}_{i:06d}.png"))

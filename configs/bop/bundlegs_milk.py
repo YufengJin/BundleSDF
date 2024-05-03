@@ -3,8 +3,8 @@ from os.path import join as p_join
 
 primary_device="cuda:0"
 seed = 0
-use_gui = True 
-debug_level= 0
+use_gui = False
+debug_level=2
 
 scene_name = '000000'
 
@@ -94,6 +94,7 @@ config = dict(
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.8, # For Addition of new Gaussians
+        depth_thres=0.01, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,

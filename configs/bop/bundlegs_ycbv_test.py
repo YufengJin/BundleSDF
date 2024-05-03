@@ -5,7 +5,7 @@ scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", 
 
 primary_device="cuda:0"
 seed = 0
-use_gui = True 
+use_gui = False
 debug_level=2
 
 scene_name = scenes[2]
@@ -14,8 +14,8 @@ target_object_id = 5
 map_every = 1 
 keyframe_every = 5
 mapping_window_size = 24
-tracking_iters = 30
-mapping_iters = 80 
+tracking_iters = 80 
+mapping_iters = 80
 
 group_name = "bop"
 run_name = f"{scene_name}_{seed}"
@@ -95,6 +95,7 @@ config = dict(
         num_iters=mapping_iters,
         add_new_gaussians=True,
         sil_thres=0.8, # For Addition of new Gaussians
+        depth_thres=0.01, # For Addition of new Gaussians
         use_l1=True,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
