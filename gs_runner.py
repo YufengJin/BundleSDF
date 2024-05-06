@@ -47,7 +47,49 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
 # TODO 2. add keyframe selection
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
-VIS_LOSS_IMAGE = True
+VIS_LOSS_IMAGE = False 
+
+
+def evaluate_batch_pose_error(poses_gt, poses_est):
+    num_poses = poses_est.shape[0]
+    
+    translation_errors = np.zeros(num_poses)
+    rotation_errors = np.zeros(num_poses)
+    
+    for i in range(num_poses):
+        pose_gt = poses_gt[i]
+        pose_est = poses_est[i]
+        
+        # Extract translation vectors
+        translation_gt = pose_gt[:3, 3]
+        translation_est = pose_est[:3, 3]
+        
+        # Extract rotation matrices
+        rotation_gt = pose_gt[:3, :3]
+        rotation_est = pose_est[:3, :3]
+        
+        # Calculate translation error
+        translation_error = np.linalg.norm(translation_gt - translation_est)
+        
+        # Calculate rotation error
+        rotation_error_cos = 0.5 * (np.trace(np.dot(rotation_gt.T, rotation_est)) - 1.0)
+        rotation_error_cos = min(1.0, max(-1.0, rotation_error_cos))  # Ensure value is in valid range for arccos
+        rotation_error_rad = np.arccos(rotation_error_cos)
+        rotation_error_deg = np.degrees(rotation_error_rad)
+        
+        translation_errors[i] = translation_error
+        rotation_errors[i] = rotation_error_deg
+    
+
+    if True:
+        print(f"DEBUG: Pose Estimation Evlaution: \nTranslation Error:\n \
+              \tFull Trans Error: {translation_errors} \n \
+              \tMean: {np.mean(translation_errors):.4f}, Variance: {np.var(translation_errors):.4f}  \n \
+              Rotation Error:\n \
+              \tFull Rot Error: {rotation_errors} \n \
+              \tMean: {np.mean(rotation_errors):.4f}, Variance: {np.var(rotation_errors):.4f}") 
+
+    return translation_errors, rotation_errors
 
 def visualize_camera_poses(c2ws):
     if isinstance(c2ws, torch.Tensor):
@@ -313,12 +355,12 @@ def add_new_gaussians(
         ).float()
         variables["denom"] = torch.zeros(num_pts, device="cuda").float()
         variables["max_2D_radius"] = torch.zeros(num_pts, device="cuda").float()
-        new_timestep = (
-            time_idx * torch.ones(new_pt_cld.shape[0], device="cuda").float()
-        )
-        variables["timestep"] = torch.cat(
-            (variables["timestep"], new_timestep), dim=0
-        )
+        # new_timestep = (
+        #     time_idx * torch.ones(new_pt_cld.shape[0], device="cuda").float()
+        # )
+        # variables["timestep"] = torch.cat(
+        #     (variables["timestep"], new_timestep), dim=0
+        # )
 
     # try:
     #    points = new_params["means3D"].detach().cpu().numpy().copy()
@@ -393,13 +435,14 @@ class GSRunner:
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
 
+        #from opengl to opencv
+        #TODO  remove pose preprocess outside
+        poses[:, :3, 1:3] = -poses[:, :3, 1:3]
         self._fisrt_c2w = poses[0].copy()
-
-        #ForkedPdb().set_trace()
-        poses_gt = self._preprocess_poses(poses_gt)
-        self._w2c_gt = torch.linalg.inv(poses_gt)
-
         poses = self._preprocess_poses(poses)
+
+        poses_gt[:, :3, 1:3] = -poses_gt[:, :3, 1:3]
+        self._poses_gt = poses_gt
 
         intrinsics = torch.eye(4).to(self.device)
         intrinsics[:3, :3] = torch.tensor(K)
@@ -433,15 +476,9 @@ class GSRunner:
         # Init Variables to keep track of ground truth poses and runtimes
         self.gt_w2c_all_frames = []
         self.curr_frame_id = 0
-        self.tracking_iter_time_sum = 0
-        self.tracking_iter_time_count = 0
-        self.mapping_iter_time_sum = 0
-        self.mapping_iter_time_count = 0
-        self.tracking_frame_time_sum = 0
-        self.tracking_frame_time_count = 0
-        self.mapping_frame_time_sum = 0
-        self.mapping_frame_time_count = 0
 
+        # only +1 when optimizer is called
+        self.gaussians_iter = 0
             
         self.queued_data_for_train = []
         # for training_together
@@ -475,6 +512,20 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
+    def evaluate_poses(self):
+
+        if self._poses_gt is None:
+            return None
+
+        poses = self.get_optimized_cam_poses()
+        #poses[:, :3, 1:3] = -poses[:, :3, 1:3]
+        assert isinstance(self._poses_gt, np.ndarray) and self._poses_gt.shape[1:] == (4, 4)
+        assert isinstance(poses, np.ndarray) and poses.shape[1:] == (4, 4)
+
+        # calculate the relative pose error
+        translation_errors, rotation_errors = evaluate_batch_pose_error(self._poses_gt, poses)
+         
+        return translation_errors, rotation_errors
     
     def _preprocess_poses(self, poses):
         r"""Preprocesses the poses by setting first pose in a sequence to identity and computing the relative
@@ -490,9 +541,9 @@ class GSRunner:
             - poses: :math:`(L, 4, 4)` where :math:`L` denotes sequence length.
             - Output: :math:`(L, 4, 4)` where :math:`L` denotes sequence length.
         """
-        # opencv c2w to opengl
+        # from opengl to opencv 
         gl_poses = poses.copy()
-        gl_poses[:, :3, 1:3] = -gl_poses[:, :3, 1:3]
+        #gl_poses[:, :3, 1:3] = -gl_poses[:, :3, 1:3]
         gl_poses = torch.from_numpy(gl_poses).to(self.device).type(self.dtype)
         gl_pose_ret = relative_transformation(
             gl_poses[0].unsqueeze(0).repeat(poses.shape[0], 1, 1),
@@ -589,17 +640,22 @@ class GSRunner:
     def _initialize_params(
         self, init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution
     ):
+        # TODO mean3_sq_dist can be caluclated from octree, reference: https://github.com/JonathonLuiten/Dynamic3DGaussians/blob/main/train.py:41
         num_pts = init_pt_cld.shape[0]
         means3D = init_pt_cld[:, :3]  # [num_gaussians, 3]
         unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
-        logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device="cuda")
+        logit_opacities = np.zeros((num_pts, 1))
+
+        if isinstance(mean3_sq_dist, torch.Tensor):
+            mean3_sq_dist = mean3_sq_dist.cpu().numpy()
+
         if gaussian_distribution == "isotropic":
-            log_scales = torch.tile(
-                torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1)
+            log_scales = np.tile(
+                np.log(np.sqrt(mean3_sq_dist))[..., None], (1, 1)
             )
         elif gaussian_distribution == "anisotropic":
-            log_scales = torch.tile(
-                torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3)
+            log_scales = np.tile(
+                np.log(np.sqrt(mean3_sq_dist))[..., None], (1, 3)
             )
         else:
             raise ValueError(f"Unknown gaussian_distribution {gaussian_distribution}")
@@ -617,24 +673,13 @@ class GSRunner:
         params["cam_unnorm_rots"] = cam_rots
         params["cam_trans"] = np.zeros((1, 3, num_frames))
 
-        for k, v in params.items():
-            # Check if value is already a torch tensor
-            if not isinstance(v, torch.Tensor):
-                params[k] = torch.nn.Parameter(
-                    torch.tensor(v).cuda().float().contiguous().requires_grad_(True)
-                )
-            else:
-                params[k] = torch.nn.Parameter(
-                    v.cuda().float().contiguous().requires_grad_(True)
-                )
+        params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in params.items()}
 
         variables = {
             "max_2D_radius": torch.zeros(params["means3D"].shape[0]).cuda().float(),
-            "means2D_gradient_accum": torch.zeros(params["means3D"].shape[0])
-            .cuda()
-            .float(),
+            "means2D_gradient_accum": torch.zeros(params["means3D"].shape[0]).cuda().float(),
             "denom": torch.zeros(params["means3D"].shape[0]).cuda().float(),
-            "timestep": torch.zeros(params["means3D"].shape[0]).cuda().float(),
+            #"timestep": torch.zeros(params["means3D"].shape[0]).cuda().float(),
         }
 
         return params, variables
@@ -647,6 +692,9 @@ class GSRunner:
 
         #ForkedPdb().set_trace()
         # get latest poss
+        poses[:, :3, 1:3] = -poses[:, :3, 1:3]
+
+        # from opengl to opencv
         poses = self._preprocess_poses(poses)[-1, ...].unsqueeze(0)
 
         # prepare data from training
@@ -831,7 +879,7 @@ class GSRunner:
         # rgbl1 = torch.abs(gt_im - im).sum()
         losses["im"] = 0.8 * rgbl1 + 0.2 * (1.0 - calc_ssim(im, gt_im))
 
-        if VIS_LOSS_IMAGE and (training_iter) % 5 == 0:
+        if VIS_LOSS_IMAGE and (training_iter) % 10 and (epoch_iter) % 10== 0:
             # define a function which returns an image as numpy array from figure
 
             fig, ax = plt.subplots(4, 4, figsize=(12, 12))
@@ -1006,6 +1054,7 @@ class GSRunner:
                 w2c = torch.eye(4).cuda().float()
                 w2c[:3, :3] = build_rotation(cam_rot)
                 w2c[:3, 3] = cam_tran
+                w2c = torch.linalg.inv(w2c)
 
                 opt_cam_poses.append(self._fisrt_c2w @ w2c.cpu().numpy())
                 
@@ -1064,33 +1113,55 @@ class GSRunner:
 
             optimizer = self.initialize_optimizer(lr_dict)
             for iter in range(batch_iters):
-                loss, losses = self.train_once(batch_data, iter)
+                loss, losses = self.train_once(batch_data, self.gaussians_iter)
+                loss /= len(batch_data)
                 loss.backward()
 
-                print(f"INFO: mean of opcaity of params: {torch.mean(self.params['logit_opacities'])}, \
-                      max of opacity of params: {torch.max(self.params['logit_opacities'])}, \
-                        min of opacity of params: {torch.min(self.params['logit_opacities'])}")
-                      
-                optimizer.step()
+                if True:
+                    # print the loss and gradients
+                    msg = f"DEBUG: Epoch: {epoch}/{self.cfg_gs['train']['num_epochs']}, Iteration: {iter}/{batch_iters}\n"
+                    losses_msg = f"\tTotal Loss: {loss.item()}\n"
+                    for k, v in losses.items():
+                        losses_msg += f"\t\t{k} Loss: {v.item()}\n"
 
+                    msg += losses_msg
+
+                    grad_msg = f"\tGradients:\n"
+                    for k, v in self.params.items():
+                        grad_msg += f"\t{k} grad(mean, max, min): {v.grad.mean().item()}, {v.grad.max().item()}, {v.grad.min().item()}\n"
+                
+                    msg += grad_msg
+                    print(msg)
+                
+                # set the gradients to zero
+                self.params["cam_unnorm_rots"].grad[:,:,0] = torch.tensor(0.0).to(self.device) 
+                self.params["cam_trans"].grad[:,:,0]= torch.tensor(0.0).to(self.device) 
+                optimizer.step()
                 # TODO save keyframes depending on the losses
 
                 with torch.no_grad():
                     # Prune Gaussians
-                    if self.cfg_gs['train']["prune_gaussians"]:
-                        print(f"INFO: number of gaussians before pruning: {self.params['means3D'].shape[0]}")
-                        pcl_num = self.params["means3D"].shape[0]
-                        self.params, self.variables = prune_gaussians(
-                            self.params,
-                            self.variables,
-                            optimizer,
-                            iter,
-                            self.cfg_gs['train']["pruning_dict"],
-                        )
-                        print(f"INFO: Gaussian Pruning Done. the number of gaussians pruned: {pcl_num - self.params['means3D'].shape[0]}, the remaining number of gaussians: {self.params['means3D'].shape[0]}")
+                    # if self.cfg_gs['train']["prune_gaussians"]:
+                    #     print(f"INFO: number of gaussians before pruning: {self.params['means3D'].shape[0]}")
+                    #     pcl_num = self.params["means3D"].shape[0]
+                    #     visualize_param_info(self.params)
+                    #     self.params, self.variables = prune_gaussians(
+                    #         self.params,
+                    #         self.variables,
+                    #         optimizer,
+                    #         iter,
+                    #         self.cfg_gs['train']["pruning_dict"],
+                    #     )
+                    #     print(f"INFO: Gaussian Pruning Done. the number of gaussians pruned: {pcl_num - self.params['means3D'].shape[0]}, the remaining number of gaussians: {self.params['means3D'].shape[0]}")
+                    #     msg = f"\tMore Info:\n"
+                    #     msg += f"\t\tLog Scales(mean, max, min): {self.params['log_scales'].mean().item()}, {self.params['log_scales'].max().item()}, {self.params['log_scales'].min().item()}\n"
+                    #     msg += f"\t\tLog Opacities(mean, max, min): {self.params['logit_opacities'].mean().item()}, {self.params['logit_opacities'].max().item()}, {self.params['logit_opacities'].min().item()}\n" 
+                    #     print(msg)
+                    #     visualize_param_info(self.params)
 
                     # Gaussian-Splatting's Gradient-based Densification
                     if self.cfg_gs['train']["use_gaussian_splatting_densification"]: 
+                        pcl_num = self.params["means3D"].shape[0]
                         self.params, self.variables = densify(
                             self.params,
                             self.variables,
@@ -1098,16 +1169,35 @@ class GSRunner:
                             iter,
                             self.cfg_gs['train']["densify_dict"],
                         )
+                        print(f"INFO: Gaussian-Splatting Densification Done. the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
+                        visualize_param_info(self.params)
                 optimizer.zero_grad(set_to_none=True)
+                self.gaussians_iter += 1
+
+                trans_errs, rot_errs  = self.evaluate_poses()
+                wandb.log({"trans_max_err":np.max(trans_errs), "rot_max_err":np.max(rot_errs)})
 
                 wandb.log(losses)
 
-                # prune gaussians
-
                 # denseify gaussians
+            # update translation and rotation of the camera
+            with torch.no_grad():
+                for curr_data in batch_data:
+                    time_idx = curr_data["id"]
+                    if time_idx > 0:
+                        cam_rot = F.normalize(
+                            self.params["cam_unnorm_rots"][..., time_idx].detach()
+                            )
+                    
+                        cam_tran = self.params["cam_trans"][..., time_idx].detach()
+                        w2c = torch.eye(4).cuda().float()
+                        w2c[:3, :3] = build_rotation(cam_rot)
+                        w2c[:3, 3] = cam_tran
+                        curr_data["w2c"] = w2c
+
             progress_bar.update(1)
 
-    def train_once(self, batch_data, training_iter, dssim_weight=0.2):
+    def train_once(self, batch_data, iter, dssim_weight=0.2):
         losses = {k: torch.tensor(0.0).to(self.device) for k in ["edge", "depth", "silhouette", "im"]}
 
         for curr_data in batch_data:
@@ -1155,9 +1245,9 @@ class GSRunner:
             nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
 
             mask_gt = curr_data["mask"].bool()
-            gt_im = curr_data["im"] * mask_gt
+            gt_im = curr_data["im"] 
 
-            mask = mask_gt | presence_sil_mask & nan_mask
+            mask = mask_gt & presence_sil_mask & nan_mask
 
             # canny edge detection
             gt_gray = ki.color.rgb_to_grayscale(curr_data["im"].unsqueeze(0))
@@ -1190,7 +1280,8 @@ class GSRunner:
 
             wandb.log(losses)
             # visualize debugging images
-            if VIS_LOSS_IMAGE and (training_iter) % 5 == 0:
+
+            if VIS_LOSS_IMAGE and (iter) % 100 == 0:
                 # define a function which returns an image as numpy array from figure
                 fig, ax = plt.subplots(4, 4, figsize=(12, 12))
                 weighted_render_im = im * color_mask
@@ -1288,7 +1379,7 @@ class GSRunner:
                     for j in range(4):
                         ax[i, j].axis("off")
                 # Set Title
-                suptitle = f"frame_id: {curr_data['id']}, Training Iteration: {training_iter}"
+                suptitle = f"frame_id: {curr_data['id']} Training Iteration: {iter}"
                 fig.suptitle(suptitle, fontsize=16)
                 # Figure Tight Layout
                 fig.tight_layout()
@@ -1302,23 +1393,18 @@ class GSRunner:
                 )
                 plt.close()
                 
-                seen = radius > 0
-                self.variables["max_2D_radius"][seen] = torch.max(
-                    radius[seen], self.variables["max_2D_radius"][seen]
-                )
-                self.variables["seen"] = seen
+            seen = radius > 0
+            self.variables["max_2D_radius"][seen] = torch.max(
+                radius[seen], self.variables["max_2D_radius"][seen]
+            )
+            self.variables["seen"] = seen
 
         loss_weights = self.cfg_gs["train"]["loss_weights"]
         weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
 
-        loss = sum(weighted_losses.values())/len(batch_data)
+        loss = sum(weighted_losses.values())
 
         weighted_losses['loss'] = loss
-
-        # convert to numpy
-        for k, v in weighted_losses.items():
-            weighted_losses[k] = v.item()
-    
         return loss, weighted_losses
 
     def train_together(self):
