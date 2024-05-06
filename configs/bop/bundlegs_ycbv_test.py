@@ -44,6 +44,11 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=False,
+    add_new_gaussians=True, # add new gaussians during training         
+    add_gaussian_dict=dict( # Needs to be updated based on the number of mapping iterations
+        sil_thres=0.8,
+        depth_thres=0.01,
+    ),
     train=dict(
         num_epochs=100,
         batch_size=10,
@@ -63,7 +68,30 @@ config = dict(
             depth=1.0,
             edge=1.,
             silhouette=1.
-        )
+        ),
+        prune_gaussians=True, # Prune Gaussians during Mapping
+        pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
+            start_after=0,
+            remove_big_after=0,
+            stop_after=50,
+            prune_every=1,
+            removal_opacity_threshold=0.5,
+            final_removal_opacity_threshold=0.5,
+            reset_opacities=False,
+            reset_opacities_every=500, # Doesn't consider iter 0
+        ),
+        use_gaussian_splatting_densification=False, # Use Gaussian Splatting-based Densification during Mapping
+        densify_dict=dict( # Needs to be updated based on the number of mapping iterations
+            start_after=500,
+            remove_big_after=3000,
+            stop_after=5000,
+            densify_every=100,
+            grad_thresh=0.0002,
+            num_to_split_into=2,
+            removal_opacity_threshold=0.5,
+            final_removal_opacity_threshold=0.01,
+            reset_opacities_every=3000, # Doesn't consider iter 0
+        ),
     ),
     wandb=dict(
         #entity="theairlab",

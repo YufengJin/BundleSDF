@@ -191,6 +191,150 @@ def get_pointcloud(
     else:
         return point_cld
 
+def add_new_gaussians(
+    params, variables, curr_data, sil_thres, depth_thres, time_idx, mean_sq_dist_method, gaussian_distribution
+):
+    # add new gaussians with non-presence mask
+    # Silhouette Rendering
+    transformed_gaussians = transform_to_frame(
+        params, time_idx, gaussians_grad=False, camera_grad=False
+    )
+
+    depth_sil_rendervar = transformed_params2depthplussilhouette(
+        params, curr_data["w2c"], transformed_gaussians
+    )
+    (
+        depth_sil,
+        _,
+        _,
+    ) = Renderer(
+        raster_settings=curr_data["cam"]
+    )(**depth_sil_rendervar)
+    silhouette = depth_sil[1, :, :]
+    non_presence_sil_mask = silhouette < sil_thres
+    
+    # Check for new foreground objects by using GT depth
+    gt_mask = curr_data["mask"][0, :, :]
+    gt_depth = curr_data["depth"][0, :, :]
+    # remove nan in depth
+    gt_depth = torch.nan_to_num_(gt_depth, nan=0.0)
+    render_depth = depth_sil[0, :, :]
+
+    mask = gt_mask.bool() & (gt_depth > 0)
+    # Filter out invalid depth values, remove nan in depth
+
+    non_presence_depth_mask = (render_depth-gt_depth) > depth_thres
+    # Determine non-presence mask
+    non_presence_mask = non_presence_sil_mask & mask
+    
+    # TODO how to use non_presence_depth_mask
+    #non_presence_mask = non_presence_mask | non_presence_depth_mask
+    # Flatten mask
+    non_presence_mask = non_presence_mask.reshape(-1)
+    # TODO add new gaussian
+    if False:
+        plt.subplot(2, 4, 1)
+        plt.imshow(silhouette.detach().cpu().numpy())
+        plt.title("silhouette")
+        plt.subplot(2, 4, 2)
+        plt.imshow(mask.squeeze().cpu().numpy())
+        plt.title("gt_mask")
+        plt.subplot(2, 4, 3)
+        plt.imshow(gt_depth.detach().cpu().numpy())
+        plt.colorbar()
+        plt.title("gt depth")
+        plt.subplot(2, 4, 4)
+        plt.imshow(render_depth.detach().cpu().numpy())
+        plt.colorbar()
+        plt.title("rendered depth")
+        plt.subplot(2, 4, 5)
+        plt.imshow(
+            gt_depth.detach().cpu().numpy() - render_depth.detach().cpu().numpy()
+        )
+        plt.colorbar()
+        plt.title("depth_loss")
+        plt.subplot(2, 4, 6)
+        plt.imshow(non_presence_mask.detach().cpu().numpy().reshape(*mask.shape))
+        plt.colorbar()
+        plt.title("non presence mask")
+        plt.subplot(2, 4, 7)
+        plt.imshow(non_presence_depth_mask.detach().cpu().numpy())
+        plt.colorbar()
+        plt.title("non_presence_depth_mask")
+        plt.subplot(2, 4, 8)
+        plt.imshow(non_presence_sil_mask.detach().cpu().numpy())
+        plt.colorbar()
+        plt.title("non_presence_sil_mask")
+
+        plt.show()
+
+    # coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+    #    size=0.5, origin=[0, 0, 0]
+    # )
+
+    # points = params["means3D"].detach().cpu().numpy().copy()
+    # colors = params["rgb_colors"].detach().cpu().numpy().copy()
+    # # Create a point cloud object
+    # pcl_prev = o3d.geometry.PointCloud()
+
+    # # Set the point cloud data
+    # pcl_prev.points = o3d.utility.Vector3dVector(points)
+    # pcl_prev.colors = o3d.utility.Vector3dVector(colors)
+
+    # Get the new frame Gaussians based on the Silhouette
+    if torch.sum(non_presence_mask) > 0:
+        # Get the new pointcloud in the world frame
+        curr_cam_rot = torch.nn.functional.normalize(
+            params["cam_unnorm_rots"][..., time_idx].detach()
+        )
+        curr_cam_tran = params["cam_trans"][..., time_idx].detach()
+        curr_w2c = torch.eye(4).cuda().float()
+        curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
+        curr_w2c[:3, 3] = curr_cam_tran
+        new_pt_cld, mean3_sq_dist = get_pointcloud(
+            curr_data["im"],
+            curr_data["depth"],
+            non_presence_mask,
+            curr_data["intrinsics"],
+            curr_w2c,
+            compute_mean_sq_dist=True,
+            mean_sq_dist_method=mean_sq_dist_method,
+        )
+        new_params = initialize_new_params(
+            new_pt_cld, mean3_sq_dist, gaussian_distribution
+        )
+        for k, v in new_params.items():
+            params[k] = torch.nn.Parameter(
+                torch.cat((params[k], v), dim=0).requires_grad_(True)
+            )
+        num_pts = params["means3D"].shape[0]
+        variables["means2D_gradient_accum"] = torch.zeros(
+            num_pts, device="cuda"
+        ).float()
+        variables["denom"] = torch.zeros(num_pts, device="cuda").float()
+        variables["max_2D_radius"] = torch.zeros(num_pts, device="cuda").float()
+        new_timestep = (
+            time_idx * torch.ones(new_pt_cld.shape[0], device="cuda").float()
+        )
+        variables["timestep"] = torch.cat(
+            (variables["timestep"], new_timestep), dim=0
+        )
+
+    # try:
+    #    points = new_params["means3D"].detach().cpu().numpy().copy()
+    #    colors = new_params["rgb_colors"].detach().cpu().numpy().copy()
+    #    # Create a point cloud object
+    #    pcl = o3d.geometry.PointCloud()
+
+    #    # Set the point cloud data
+    #    pcl.points = o3d.utility.Vector3dVector(points)
+    #    pcl.colors = o3d.utility.Vector3dVector(colors)
+
+    #    # Visualize the point cloud
+    #    o3d.visualization.draw([coordinate_frame, pcl_prev, pcl])
+    # except:
+    #    print("Visualization of points fails")
+
 def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
@@ -235,7 +379,7 @@ def initialize_optimizer_sep(params, lrs_dict, tracking):
 
 class GSRunner:
     def __init__(
-        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, wandb_run=None):
+        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, poses_gt=None, wandb_run=None):
         # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
         # TODO check poses c2w or obs_in_cam, z axis
         # preprocess data -> to tensor
@@ -252,6 +396,9 @@ class GSRunner:
         self._fisrt_c2w = poses[0].copy()
 
         #ForkedPdb().set_trace()
+        poses_gt = self._preprocess_poses(poses_gt)
+        self._w2c_gt = torch.linalg.inv(poses_gt)
+
         poses = self._preprocess_poses(poses)
 
         intrinsics = torch.eye(4).to(self.device)
@@ -297,7 +444,8 @@ class GSRunner:
 
             
         self.queued_data_for_train = []
-        #self.queued_data_for_train = deque()
+        # for training_together
+        # self.queued_data_for_train = deque()
 
         # prepare data from training
         for color, depth, mask, pose in zip(colors, depths, masks, poses):
@@ -321,6 +469,7 @@ class GSRunner:
                     "w2c": w2c,
                     "first_c2w": self.first_frame_w2c,
                     "iter_gt_w2c_list": self.gt_w2c_all_frames.copy(),
+                    "seen": False,
                     "optimized": False
                 }
             )
@@ -520,6 +669,7 @@ class GSRunner:
                     "w2c": w2c,
                     "first_c2w": self.first_frame_w2c,
                     "iter_gt_w2c_list": self.gt_w2c_all_frames.copy(),      # only for trajectory prediction
+                    "seen": False,
                     "optimized": False
                 }
             )
@@ -827,150 +977,6 @@ class GSRunner:
 
         return loss, variables, weighted_losses
 
-    @staticmethod
-    def add_new_gaussians(
-        params, variables, curr_data, sil_thres, depth_thres, time_idx, mean_sq_dist_method, gaussian_distribution
-    ):
-        # add new gaussians with non-presence mask
-        # Silhouette Rendering
-        transformed_gaussians = transform_to_frame(
-            params, time_idx, gaussians_grad=False, camera_grad=False
-        )
-
-        depth_sil_rendervar = transformed_params2depthplussilhouette(
-            params, curr_data["w2c"], transformed_gaussians
-        )
-        (
-            depth_sil,
-            _,
-            _,
-        ) = Renderer(
-            raster_settings=curr_data["cam"]
-        )(**depth_sil_rendervar)
-        silhouette = depth_sil[1, :, :]
-        non_presence_sil_mask = silhouette < sil_thres
-        
-        # Check for new foreground objects by using GT depth
-        gt_mask = curr_data["mask"][0, :, :]
-        gt_depth = curr_data["depth"][0, :, :]
-        # remove nan in depth
-        gt_depth = torch.nan_to_num_(gt_depth, nan=0.0)
-        render_depth = depth_sil[0, :, :]
-
-        mask = gt_mask.bool() & (gt_depth > 0)
-        # Filter out invalid depth values, remove nan in depth
-
-        non_presence_depth_mask = (render_depth-gt_depth) > depth_thres
-        # Determine non-presence mask
-        non_presence_mask = non_presence_sil_mask & mask
-        
-        # TODO how to use non_presence_depth_mask
-        #non_presence_mask = non_presence_mask | non_presence_depth_mask
-        # Flatten mask
-        non_presence_mask = non_presence_mask.reshape(-1)
-        # TODO add new gaussian
-        if False:
-            plt.subplot(2, 4, 1)
-            plt.imshow(silhouette.detach().cpu().numpy())
-            plt.title("silhouette")
-            plt.subplot(2, 4, 2)
-            plt.imshow(mask.squeeze().cpu().numpy())
-            plt.title("gt_mask")
-            plt.subplot(2, 4, 3)
-            plt.imshow(gt_depth.detach().cpu().numpy())
-            plt.colorbar()
-            plt.title("gt depth")
-            plt.subplot(2, 4, 4)
-            plt.imshow(render_depth.detach().cpu().numpy())
-            plt.colorbar()
-            plt.title("rendered depth")
-            plt.subplot(2, 4, 5)
-            plt.imshow(
-                gt_depth.detach().cpu().numpy() - render_depth.detach().cpu().numpy()
-            )
-            plt.colorbar()
-            plt.title("depth_loss")
-            plt.subplot(2, 4, 6)
-            plt.imshow(non_presence_mask.detach().cpu().numpy().reshape(*mask.shape))
-            plt.colorbar()
-            plt.title("non presence mask")
-            plt.subplot(2, 4, 7)
-            plt.imshow(non_presence_depth_mask.detach().cpu().numpy())
-            plt.colorbar()
-            plt.title("non_presence_depth_mask")
-            plt.subplot(2, 4, 8)
-            plt.imshow(non_presence_sil_mask.detach().cpu().numpy())
-            plt.colorbar()
-            plt.title("non_presence_sil_mask")
-
-            plt.show()
-
-        # coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
-        #    size=0.5, origin=[0, 0, 0]
-        # )
-
-        # points = params["means3D"].detach().cpu().numpy().copy()
-        # colors = params["rgb_colors"].detach().cpu().numpy().copy()
-        # # Create a point cloud object
-        # pcl_prev = o3d.geometry.PointCloud()
-
-        # # Set the point cloud data
-        # pcl_prev.points = o3d.utility.Vector3dVector(points)
-        # pcl_prev.colors = o3d.utility.Vector3dVector(colors)
-
-        # Get the new frame Gaussians based on the Silhouette
-        if torch.sum(non_presence_mask) > 0:
-            # Get the new pointcloud in the world frame
-            curr_cam_rot = torch.nn.functional.normalize(
-                params["cam_unnorm_rots"][..., time_idx].detach()
-            )
-            curr_cam_tran = params["cam_trans"][..., time_idx].detach()
-            curr_w2c = torch.eye(4).cuda().float()
-            curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-            curr_w2c[:3, 3] = curr_cam_tran
-            new_pt_cld, mean3_sq_dist = get_pointcloud(
-                curr_data["im"],
-                curr_data["depth"],
-                non_presence_mask,
-                curr_data["intrinsics"],
-                curr_w2c,
-                compute_mean_sq_dist=True,
-                mean_sq_dist_method=mean_sq_dist_method,
-            )
-            new_params = initialize_new_params(
-                new_pt_cld, mean3_sq_dist, gaussian_distribution
-            )
-            for k, v in new_params.items():
-                params[k] = torch.nn.Parameter(
-                    torch.cat((params[k], v), dim=0).requires_grad_(True)
-                )
-            num_pts = params["means3D"].shape[0]
-            variables["means2D_gradient_accum"] = torch.zeros(
-                num_pts, device="cuda"
-            ).float()
-            variables["denom"] = torch.zeros(num_pts, device="cuda").float()
-            variables["max_2D_radius"] = torch.zeros(num_pts, device="cuda").float()
-            new_timestep = (
-                time_idx * torch.ones(new_pt_cld.shape[0], device="cuda").float()
-            )
-            variables["timestep"] = torch.cat(
-                (variables["timestep"], new_timestep), dim=0
-            )
-
-        # try:
-        #    points = new_params["means3D"].detach().cpu().numpy().copy()
-        #    colors = new_params["rgb_colors"].detach().cpu().numpy().copy()
-        #    # Create a point cloud object
-        #    pcl = o3d.geometry.PointCloud()
-
-        #    # Set the point cloud data
-        #    pcl.points = o3d.utility.Vector3dVector(points)
-        #    pcl.colors = o3d.utility.Vector3dVector(colors)
-
-        #    # Visualize the point cloud
-        #    o3d.visualization.draw([coordinate_frame, pcl_prev, pcl])
-        # except:
-        #    print("Visualization of points fails")
 
  
     def initialize_optimizer(self, lr_dict):
@@ -1039,19 +1045,67 @@ class GSRunner:
                         self.params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
                         self.params["cam_trans"][..., time_idx] = rel_w2c_tran
 
+                        if not curr_data["seen"] and self.cfg_gs['add_new_gaussians']:
+                            print(f"INFO: Adding new gaussians for frame {time_idx}")
+                            pcl_num = self.params["means3D"].shape[0]
+                            # add new gaussians
+                            add_new_gaussians(
+                                self.params,
+                                self.variables,
+                                curr_data,
+                                self.cfg_gs['add_gaussian_dict']['sil_thres'],
+                                self.cfg_gs['add_gaussian_dict']['depth_thres'],
+                                time_idx,
+                                self.cfg_gs["mean_sq_dist_method"],
+                                self.cfg_gs["gaussian_distribution"],
+                            )         
+                            curr_data['seen'] = True
+                            print(f"INFO: Adding new gaussians done, the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
+
             optimizer = self.initialize_optimizer(lr_dict)
             for iter in range(batch_iters):
                 loss, losses = self.train_once(batch_data, iter)
                 loss.backward()
+
+                print(f"INFO: mean of opcaity of params: {torch.mean(self.params['logit_opacities'])}, \
+                      max of opacity of params: {torch.max(self.params['logit_opacities'])}, \
+                        min of opacity of params: {torch.min(self.params['logit_opacities'])}")
+                      
                 optimizer.step()
+
+                # TODO save keyframes depending on the losses
+
+                with torch.no_grad():
+                    # Prune Gaussians
+                    if self.cfg_gs['train']["prune_gaussians"]:
+                        print(f"INFO: number of gaussians before pruning: {self.params['means3D'].shape[0]}")
+                        pcl_num = self.params["means3D"].shape[0]
+                        self.params, self.variables = prune_gaussians(
+                            self.params,
+                            self.variables,
+                            optimizer,
+                            iter,
+                            self.cfg_gs['train']["pruning_dict"],
+                        )
+                        print(f"INFO: Gaussian Pruning Done. the number of gaussians pruned: {pcl_num - self.params['means3D'].shape[0]}, the remaining number of gaussians: {self.params['means3D'].shape[0]}")
+
+                    # Gaussian-Splatting's Gradient-based Densification
+                    if self.cfg_gs['train']["use_gaussian_splatting_densification"]: 
+                        self.params, self.variables = densify(
+                            self.params,
+                            self.variables,
+                            optimizer,
+                            iter,
+                            self.cfg_gs['train']["densify_dict"],
+                        )
                 optimizer.zero_grad(set_to_none=True)
 
                 wandb.log(losses)
 
-            progress_bar.update(1)
                 # prune gaussians
 
                 # denseify gaussians
+            progress_bar.update(1)
 
     def train_once(self, batch_data, training_iter, dssim_weight=0.2):
         losses = {k: torch.tensor(0.0).to(self.device) for k in ["edge", "depth", "silhouette", "im"]}
@@ -1134,6 +1188,7 @@ class GSRunner:
             rgbl1 = torch.abs(gt_im - im)[color_mask].mean()
             losses["im"] += (1-dssim_weight) * rgbl1 + dssim_weight * (1.0 - calc_ssim(im, gt_im))
 
+            wandb.log(losses)
             # visualize debugging images
             if VIS_LOSS_IMAGE and (training_iter) % 5 == 0:
                 # define a function which returns an image as numpy array from figure
@@ -1256,7 +1311,7 @@ class GSRunner:
         loss_weights = self.cfg_gs["train"]["loss_weights"]
         weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
 
-        loss = sum(weighted_losses.values())
+        loss = sum(weighted_losses.values())/len(batch_data)
 
         weighted_losses['loss'] = loss
 
@@ -1265,7 +1320,6 @@ class GSRunner:
             weighted_losses[k] = v.item()
     
         return loss, weighted_losses
-         
 
     def train_together(self):
         # TODO pop the earliest data
@@ -1466,6 +1520,8 @@ class GSRunner:
                     print("Failed to evaluate trajectory.")
 
             # Densification & KeyFrame-based Mapping
+            print(f"INFO: Number of Gaussians before adding new gaussians: {params['means3D'].shape[0]}")
+            print(f"INFO: lof_opacities: {torch.mean(params['logit_opacities'])}, max of opacity: {torch.max(params['logit_opacities'])}, min of opacity: {torch.min(params['logit_opacities'])}")
             if time_idx == 0 or (time_idx + 1) % config["map_every"] == 0:
                 # Densification
                 if config["mapping"]["add_new_gaussians"] and time_idx > 0:
@@ -1490,6 +1546,8 @@ class GSRunner:
                             }
                         )
 
+                print(f"INFO: Number of Gaussians after adding new gaussians: {params['means3D'].shape[0]}")
+                print(f"INFO: lof_opacities: {torch.mean(params['logit_opacities'])}, max of opacity: {torch.max(params['logit_opacities'])}, min of opacity: {torch.min(params['logit_opacities'])}")
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
                     curr_cam_rot = F.normalize(
@@ -1583,6 +1641,8 @@ class GSRunner:
                         )
                     # Backprop
                     loss.backward()
+                    print(f"INFO: Number of Gaussians after mapping: {params['means3D'].shape[0]} at mapping iteration {mapping_iter}")
+                    print(f"INFO: lof_opacities: {torch.mean(params['logit_opacities'])}, max of opacity: {torch.max(params['logit_opacities'])}, min of opacity: {torch.min(params['logit_opacities'])}")
 
                     with torch.no_grad():
                         # Prune Gaussians

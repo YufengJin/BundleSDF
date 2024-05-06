@@ -192,7 +192,7 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 
 # load from bop dataset
 #dataRootDir = '/home/datasets/BOP/ycbv/train_pbr/000000/'
-dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_outputs/bop_data/ycbv/train_pbr/000000'
+dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_output/bop_data/ycbv/train_pbr/000000'
 target_object_id = 11 
 
 cameraInfo = json.load(open(dataRootDir + '/scene_camera.json', 'r'))
@@ -320,6 +320,8 @@ cfg = experiment.config
 
 rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
+poses_gt = glcam_in_obs_gt
+
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
 first_init_num_frames = 5 
@@ -360,7 +362,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    mode='online'   #"disabled"
+    mode='disabled'
 )
 
 gsRunner = GSRunner(
@@ -372,6 +374,7 @@ gsRunner = GSRunner(
     poses=first_poses,
     total_num_frames=total_num_frames,
     pointcloud=pcl,
+    poses_gt=poses_gt,
     wandb_run=wandb_run,
 )
 gsRunner.train()
