@@ -157,7 +157,7 @@ def remove_points(to_remove, params, variables, optimizer):
     variables['max_2D_radius'] = variables['max_2D_radius'][to_keep]
     if 'timestep' in variables.keys():
         variables['timestep'] = variables['timestep'][to_keep]
-    #return params, variables
+    return params, variables
 
 
 def inverse_sigmoid(x):
@@ -190,6 +190,7 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
 
 
 def densify(params, variables, optimizer, iter, densify_dict):
+    # TODO modify based on dynaimc 3D gaussian
     if iter <= densify_dict['stop_after']:
         variables = accumulate_mean2d_gradient(variables)
         grad_thresh = densify_dict['grad_thresh']
@@ -222,8 +223,7 @@ def densify(params, variables, optimizer, iter, densify_dict):
             variables['denom'] = torch.zeros(num_pts, device="cuda")
             variables['max_2D_radius'] = torch.zeros(num_pts, device="cuda")
             to_remove = torch.cat((to_split, torch.zeros(n * to_split.sum(), dtype=torch.bool, device="cuda")))
-            remove_points(to_remove, params, variables, optimizer)
-            #params, variables = remove_points(to_remove, params, variables, optimizer)
+            params, variables = remove_points(to_remove, params, variables, optimizer)
 
             if iter == densify_dict['stop_after']:
                 remove_threshold = densify_dict['final_removal_opacity_threshold']
@@ -233,8 +233,7 @@ def densify(params, variables, optimizer, iter, densify_dict):
             if iter >= densify_dict['remove_big_after']:
                 big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
-            #params, variables = remove_points(to_remove, params, variables, optimizer)
-            remove_points(to_remove, params, variables, optimizer)
+            params, variables = remove_points(to_remove, params, variables, optimizer)
 
             torch.cuda.empty_cache()
 

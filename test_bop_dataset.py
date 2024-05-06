@@ -83,6 +83,38 @@ def preprocess_data(
     poses[:, :3, 3] *= sc_factor
     return rgbs, depths, masks, poses
 
+def evaluate_batch_pose_error(poses_gt, poses_est):
+    num_poses = poses_est.shape[0]
+    
+    translation_errors = np.zeros(num_poses)
+    rotation_errors = np.zeros(num_poses)
+    
+    for i in range(num_poses):
+        pose_gt = poses_gt[i]
+        pose_est = poses_est[i]
+        
+        # Extract translation vectors
+        translation_gt = pose_gt[:3, 3]
+        translation_est = pose_est[:3, 3]
+        
+        # Extract rotation matrices
+        rotation_gt = pose_gt[:3, :3]
+        rotation_est = pose_est[:3, :3]
+        
+        # Calculate translation error
+        translation_error = np.linalg.norm(translation_gt - translation_est)
+        
+        # Calculate rotation error
+        rotation_error_cos = 0.5 * (np.trace(np.dot(rotation_gt.T, rotation_est)) - 1.0)
+        rotation_error_cos = min(1.0, max(-1.0, rotation_error_cos))  # Ensure value is in valid range for arccos
+        rotation_error_rad = np.arccos(rotation_error_cos)
+        rotation_error_deg = np.degrees(rotation_error_rad)
+        
+        translation_errors[i] = translation_error
+        rotation_errors[i] = rotation_error_deg
+    
+    return translation_errors, rotation_errors
+
 
 def fuse_pointcloud(rgbs, depths, masks, glcam_in_obs):
     def rgbd_to_pointcloud(rgb_image, depth_image, K):
@@ -193,7 +225,7 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 # load from bop dataset
 #dataRootDir = '/home/datasets/BOP/ycbv/train_pbr/000000/'
 dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_output/bop_data/ycbv/train_pbr/000000'
-target_object_id = 11 
+target_object_id = 5 
 
 cameraInfo = json.load(open(dataRootDir + '/scene_camera.json', 'r'))
 
@@ -242,10 +274,11 @@ for imgIdx, content in scene_gt.items():
             c2w_gt = np.linalg.inv(c2w)
             c2w_gt[:3, 1:3] *= -1 # opengl
 
-            # add translation and rotation error to camera pose
             c2w = c2w_gt.copy()
-            c2w[:3, 3] += np.random.randn(3) * noise
-            c2w[:3, :3] = c2w[:3, :3] @ cv2.Rodrigues(np.random.randn(3) * noise)[0]
+            # add translation and rotation error to camera pose
+            if len(c2ws) > 0:
+                c2w[:3, 3] += np.random.randn(3) * noise
+                c2w[:3, :3] = c2w[:3, :3] @ cv2.Rodrigues(np.random.randn(3) * noise)[0]
 
             # load rgb, depth, mask
             imgId = int(imgIdx)
@@ -320,8 +353,6 @@ cfg = experiment.config
 
 rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
-poses_gt = glcam_in_obs_gt
-
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
 first_init_num_frames = 5 
@@ -362,7 +393,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    mode='disabled'
+    mode= 'disabled' #'online'
 )
 
 gsRunner = GSRunner(
@@ -374,7 +405,7 @@ gsRunner = GSRunner(
     poses=first_poses,
     total_num_frames=total_num_frames,
     pointcloud=pcl,
-    poses_gt=poses_gt,
+    poses_gt=glcam_in_obs_gt,
     wandb_run=wandb_run,
 )
 gsRunner.train()
