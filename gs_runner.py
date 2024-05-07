@@ -1222,6 +1222,7 @@ class GSRunner:
             ) = Renderer(
                 raster_settings=self.cam
             )(**rendervar)
+
             self.variables["means2D"] = rendervar[
                 "means2D"
             ]  # Gradient only accum from colour render for densification
@@ -1238,6 +1239,8 @@ class GSRunner:
             depth = depth_sil[0, :, :].unsqueeze(0)
             silhouette = depth_sil[1, :, :]
             presence_sil_mask = silhouette > self.cfg_gs["train"]["sil_thres"]
+            
+            # TODO if uncertainty is necessary? depth_sq is the square of the depth
             depth_sq = depth_sil[2, :, :].unsqueeze(0)
             uncertainty = depth_sq - depth**2
             uncertainty = uncertainty.detach()
@@ -1393,6 +1396,7 @@ class GSRunner:
                 )
                 plt.close()
                 
+            # TODO not update every time, because optimizer is updated once per batch, ?????????
             seen = radius > 0
             self.variables["max_2D_radius"][seen] = torch.max(
                 radius[seen], self.variables["max_2D_radius"][seen]

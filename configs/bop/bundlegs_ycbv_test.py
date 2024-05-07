@@ -58,9 +58,9 @@ config = dict(
             means3D=0.0001,
             rgb_colors=0.0025,
             unnorm_rotations=0.001,
-            logit_opacities=0.1,
+            logit_opacities=0.05,
             log_scales=0.001,
-            cam_unnorm_rots=0.001,
+            cam_unnorm_rots=0.0001,
             cam_trans=0.0001,
         ),
         loss_weights=dict(
