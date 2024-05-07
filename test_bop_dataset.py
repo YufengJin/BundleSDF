@@ -12,6 +12,11 @@ import time
 import hashlib
 from gs_runner import GSRunner
 
+import torch   
+seed = 0
+np.random.seed(seed)
+torch.manual_seed(seed)
+
 def run_gui(gui_lock, gui_dict):
 
     # initialize pointcloud
@@ -250,7 +255,7 @@ load_stop = False
 
 frame_id = 0
 
-noise = 0.01
+noise = 0.02
 for imgIdx, content in scene_gt.items():
     if load_stop:
         break
@@ -355,7 +360,7 @@ rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
-first_init_num_frames = 5 
+first_init_num_frames = 50 
 
 frame_id = first_init_num_frames
 
@@ -377,6 +382,7 @@ first_c2w[:3, 1:3] *= -1
 obj_init_pose = np.linalg.inv(first_c2w)
 
 pcd.transform(obj_init_pose)
+o3d.visualization.draw_geometries([pcd, world_coord])
 # transit open3d pointcloud to numpy array
 pcl = np.asarray(pcd.points)
 pcl = np.concatenate([pcl, np.asarray(pcd.colors)], axis=1)
@@ -393,7 +399,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    mode= 'disabled' #'online'
+    mode= 'online'
 )
 
 gsRunner = GSRunner(
@@ -404,9 +410,10 @@ gsRunner = GSRunner(
     K=K,
     poses=first_poses,
     total_num_frames=total_num_frames,
-    pointcloud=pcl,
+    #pointcloud=pcl,
     poses_gt=glcam_in_obs_gt,
     wandb_run=wandb_run,
+    run_gui=True,
 )
 gsRunner.train()
 

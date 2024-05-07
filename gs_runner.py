@@ -47,8 +47,46 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
 # TODO 2. add keyframe selection
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
-VIS_LOSS_IMAGE = False 
+VIS_LOSS_IMAGE =  True
 
+def run_gui_thread(gui_lock, gui_dict):
+    # initialize pointcloud
+    num_points = 1000
+    points = np.random.rand(num_points, 3)
+    colors = np.random.rand(num_points, 3)
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+
+    # configure the open3d visualizer size
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(width=800, height=600)
+
+    vis.add_geometry(pcd)
+
+    while 1:
+        with gui_lock:
+            join = gui_dict['join']
+
+            if 'pointcloud' in gui_dict:
+                new_pcd = gui_dict["pointcloud"]
+                del gui_dict["pointcloud"]
+            else:
+                new_pcd = None
+        if join:
+            break
+
+        if new_pcd is not None:
+            pcd.points = o3d.utility.Vector3dVector(new_pcd[:, :3])
+            pcd.colors = o3d.utility.Vector3dVector(new_pcd[:, 3:6])
+
+        time.sleep(0.05)
+        vis.update_geometry(pcd)
+        vis.poll_events()
+        vis.update_renderer()
+
+    vis.destroy_window()
 
 def evaluate_batch_pose_error(poses_gt, poses_est):
     num_poses = poses_est.shape[0]
@@ -113,7 +151,6 @@ def visualize_param_info(params):
     if "rgb_colors" in params:
         colors = params["rgb_colors"].detach().cpu().numpy()
         pcl.colors = o3d.utility.Vector3dVector(colors)
-
 
     if "logit_opacities" in params:
         # Get the color map by name:
@@ -421,7 +458,7 @@ def initialize_optimizer_sep(params, lrs_dict, tracking):
 
 class GSRunner:
     def __init__(
-        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, poses_gt=None, wandb_run=None):
+        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, poses_gt=None, wandb_run=None, run_gui=False):
         # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
         # TODO check poses c2w or obs_in_cam, z axis
         # preprocess data -> to tensor
@@ -434,6 +471,15 @@ class GSRunner:
         self._scale = scale
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
+
+        self.run_gui = run_gui
+
+        if self.run_gui:
+            import threading
+            self.gui_lock = threading.Lock()
+            self.gui_dict = {"join": False}
+            gui_runner = threading.Thread(target=run_gui_thread, args=(self.gui_lock, self.gui_dict))
+            gui_runner.start()
 
         #from opengl to opencv
         #TODO  remove pose preprocess outside
@@ -512,7 +558,7 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
-    def evaluate_poses(self):
+    def evaluate_poses(self, visualize=False):
 
         if self._poses_gt is None:
             return None
@@ -524,7 +570,41 @@ class GSRunner:
 
         # calculate the relative pose error
         translation_errors, rotation_errors = evaluate_batch_pose_error(self._poses_gt, poses)
-         
+
+        if visualize:
+            num_poses = poses.shape[0]
+            poses_gt = self._poses_gt[:num_poses,...]
+            assert poses_gt.shape == poses.shape
+
+            world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=.5)
+            
+            poses_gt_frames = o3d.geometry.TriangleMesh()
+            poses_est_frames = o3d.geometry.TriangleMesh()
+            for pose_gt, pose_est in zip(poses_gt, poses):
+                cam_frame_gt = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+                cam_frame_gt.transform(pose_gt)
+                poses_gt_frames += cam_frame_gt
+
+                cam_frame_est = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+                cam_frame_est.transform(pose_est)
+                poses_est_frames += cam_frame_est
+
+            est_color = np.asarray(poses_est_frames.vertex_colors)
+            poses_est_frames.vertex_colors = o3d.utility.Vector3dVector(est_color*0.5)
+
+            # convert to PointCloud
+            pcd = o3d.geometry.PointCloud()
+
+            pcd += poses_gt_frames.sample_points_uniformly(number_of_points=10000)
+            pcd += poses_est_frames.sample_points_uniformly(number_of_points=10000)
+
+            # pointcloud to numpy
+            points = np.asarray(pcd.points)
+            colors = np.asarray(pcd.colors)
+            pcl = np.concatenate([points, colors], axis=1)
+
+            return translation_errors, rotation_errors, pcl
+
         return translation_errors, rotation_errors
     
     def _preprocess_poses(self, poses):
@@ -604,7 +684,7 @@ class GSRunner:
         )
 
         # Get Initial Point Cloud (PyTorch CUDA Tensor)
-        mask_ = (depth > 0) & mask.bool()  # Mask out invalid depth values
+        mask = (depth > 0) & mask.bool()  # Mask out invalid depth values
         mask = mask.reshape(-1)
 
         if pointcloud is not None:
@@ -628,8 +708,10 @@ class GSRunner:
             init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution
         )
 
+        center_pcl = torch.mean(init_pt_cld[:, :3], dim=0)
+        radius = torch.norm(init_pt_cld[:, :3] - center_pcl, dim=1).max()
         # Initialize an estimate of scene radius for Gaussian-Splatting Densification, TODO understanding variables scene_radius
-        variables["scene_radius"] = torch.max(depth) / scene_radius_depth_ratio
+        variables["scene_radius"] = 1.5 * radius 
 
         self.params = params
         self.variables = variables
@@ -723,310 +805,6 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
-    def get_loss(
-        self,
-        params,
-        curr_data,
-        variables,
-        iter_time_idx,
-        loss_weights,
-        use_sil_for_loss,
-        sil_thres,
-        use_l1,
-        ignore_outlier_depth_loss,
-        tracking=False,
-        do_ba=False,
-        training_iter=None,
-    ):
-        def erosion(bool_image, kernel_size=3):
-            # Convert boolean image to a tensor with dtype torch.float32
-            bool_image_tensor = bool_image.float()
-
-            # Define a kernel for erosion
-            kernel = torch.ones(kernel_size, kernel_size).to(bool_image.device)
-
-            # Apply erosion using convolution
-            eroded_image = F.conv2d(
-                bool_image_tensor.unsqueeze(0),
-                kernel.unsqueeze(0).unsqueeze(0),
-                padding=kernel_size // 2,
-            )
-
-            # Threshold to convert back to boolean image
-            eroded_image = (eroded_image >= kernel_size**2).squeeze(0).squeeze(0)
-
-            return eroded_image
-            # Initialize Loss Dictionary
-
-        losses = {}
-
-        if tracking:
-            # Get current frame Gaussians, where only the camera pose gets gradient
-            transformed_gaussians = transform_to_frame(
-                params, iter_time_idx, gaussians_grad=False, camera_grad=True
-            )
-        else:
-            if do_ba:
-                # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-                transformed_gaussians = transform_to_frame(
-                    params, iter_time_idx, gaussians_grad=True, camera_grad=True
-                )
-            else:
-                # Get current frame Gaussians, where only the Gaussians get gradient
-                transformed_gaussians = transform_to_frame(
-                    params, iter_time_idx, gaussians_grad=True, camera_grad=False
-                )
-
-        # Initialize Render Variables
-        rendervar = transformed_params2rendervar(params, transformed_gaussians)
-        depth_sil_rendervar = transformed_params2depthplussilhouette(
-            params, curr_data["w2c"], transformed_gaussians
-        )
-
-        # RGB Rendering
-        rendervar["means2D"].retain_grad()
-        (
-            im,
-            radius,
-            _,
-        ) = Renderer(
-            raster_settings=curr_data["cam"]
-        )(**rendervar)
-        variables["means2D"] = rendervar[
-            "means2D"
-        ]  # Gradient only accum from colour render for densification
-
-        # Depth & Silhouette Rendering
-        (
-            depth_sil,
-            _,
-            _,
-        ) = Renderer(
-            raster_settings=curr_data["cam"]
-        )(**depth_sil_rendervar)
-
-
-        depth = depth_sil[0, :, :].unsqueeze(0)
-        silhouette = depth_sil[1, :, :]
-        presence_sil_mask = silhouette > sil_thres
-        depth_sq = depth_sil[2, :, :].unsqueeze(0)
-        uncertainty = depth_sq - depth**2
-        uncertainty = uncertainty.detach()
-        # M    ask with valid depth values (accounts for outlier depth values)
-        nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
-        """
-        #if ignore_outlier_depth_loss:
-        #    depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
-        #    mask = (depth_error < 10*depth_error.median())
-        #    mask = mask & (curr_data['depth'] > 0)
-        #else:
-        #    mask = (curr_data['depth'] > 0)
-        """
-        mask_gt = curr_data["mask"].bool()
-        gt_im = curr_data["im"] * mask_gt
-
-        # Mask with presence silhouette mask (accounts for empty space)
-        if tracking:
-            mask = mask_gt | presence_sil_mask
-            mask = ki.morphology.dilation(
-                mask.float().unsqueeze(0), torch.ones(10, 10).cuda()
-            )
-            mask = mask.detach().squeeze(0).bool()
-        else:
-            mask = mask_gt & presence_sil_mask & nan_mask
-            mask = mask.detach()
-
-        # canny edge detection
-        gt_gray = ki.color.rgb_to_grayscale(curr_data["im"].unsqueeze(0))
-
-        # sobel edges
-        gt_edge = ki.filters.sobel(gt_gray).squeeze(0)
-        # canny edges
-        # gt_edge= ki.filters.canny(gt_gray)[0]
-
-        gray = ki.color.rgb_to_grayscale(im.unsqueeze(0))
-
-        # sobel edges
-        edge = ki.filters.sobel(gray).squeeze(0)
-        # edge edges
-        # edge= ki.filters.canny(gray)[0]
-
-        # losses['edge'] = torch.abs(gt_edge - edge)[mask.unsqueeze(0)].sum()
-        if tracking:
-            losses["edge"] = torch.abs(gt_edge - edge)[mask].sum()  # sum()
-        else:
-            losses["edge"] = torch.abs(gt_edge - edge)[mask].mean()
-
-        # Depth loss
-        if tracking:
-            losses["depth"] = torch.abs(curr_data["depth"] - depth)[mask].sum()
-        else:
-            losses["depth"] = torch.abs(curr_data["depth"] - depth)[mask].mean()
-
-        if tracking:
-            losses["silhouette"] = torch.abs(silhouette.float() - curr_data["mask"]).sum()
-        else:
-            losses["silhouette"] = torch.abs(silhouette.float() - curr_data["mask"]).sum()
-
-
-        color_mask = torch.tile(mask, (3, 1, 1))
-        color_mask = color_mask.detach()
-        if tracking:
-            rgbl1 = torch.abs(gt_im - im)[color_mask].sum()
-        else:
-            rgbl1 = torch.abs(gt_im - im)[color_mask].mean()
-
-        # rgbl1 = torch.abs(gt_im - im).sum()
-        losses["im"] = 0.8 * rgbl1 + 0.2 * (1.0 - calc_ssim(im, gt_im))
-
-        if VIS_LOSS_IMAGE and (training_iter) % 10 and (epoch_iter) % 10== 0:
-            # define a function which returns an image as numpy array from figure
-
-            fig, ax = plt.subplots(4, 4, figsize=(12, 12))
-            weighted_render_im = im * color_mask
-            weighted_im = curr_data["im"] * color_mask
-            weighted_render_depth = depth * mask
-            weighted_depth = curr_data["depth"] * mask
-            weighted_render_candy = (edge * mask)
-            weighted_candy = (gt_edge * mask)
-            viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
-
-            diff_rgb = (
-                torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
-            )
-            diff_depth = (
-                torch.abs(weighted_render_depth - weighted_depth)
-                .mean(dim=0)
-                .detach()
-                .cpu()
-            )
-            diff_candy = (
-                torch.abs(weighted_render_candy - weighted_candy)
-                .mean(dim=0)
-                .detach()
-                .cpu()
-            )
-            diff_sil = (
-                torch.abs(presence_sil_mask.float() - curr_data["mask"])
-                .squeeze(0)
-                .detach()
-                .cpu()
-            )
-            ax[0, 0].imshow(viz_img)
-            ax[0, 0].set_title("Weighted GT RGB")
-            viz_render_img = torch.clip(
-                weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1
-            )
-            ax[1, 0].imshow(viz_render_img)
-            ax[1, 0].set_title("Weighted Rendered RGB")
-            ax_im = ax[0, 1].imshow(weighted_depth[0].detach().cpu())
-            cbar = fig.colorbar(ax_im, ax=ax[0, 1])
-            ax[0, 1].set_title("Weighted GT Depth")
-            ax[1, 1].imshow(
-                weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6
-            )
-            ax[1, 1].set_title("Weighted Rendered Depth")
-            ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
-            ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
-            ax_im = ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
-            cbar = fig.colorbar(ax_im, ax=ax[1, 2])
-            ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
-            ax_im = ax[0, 3].imshow(silhouette.detach().squeeze().cpu())
-            cbar = fig.colorbar(ax_im, ax=ax[0, 3])
-            ax[0, 3].set_title("Silhouette Mask")
-            ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
-            ax[1, 3].set_title("Loss Mask")
-            ax[2, 0].imshow(curr_data["mask"].detach().squeeze().cpu())
-            ax[2, 0].set_title("gt Mask")
-            ax_im = ax[2, 1].imshow(depth_sq.detach().squeeze().cpu())
-            # Add colorbar
-            cbar = fig.colorbar(ax_im, ax=ax[2, 1])
-            ax[2, 1].set_title("uncertainty mask")
-            ax[2, 2].imshow(
-                (im.permute(1, 2, 0).detach().squeeze().cpu().numpy() * 255).astype(
-                    np.uint8
-                )
-            )
-            ax[2, 2].set_title("Rendered RGB")
-            ax[2, 3].imshow(gt_im.permute(1, 2, 0).detach().squeeze().cpu())
-            ax[2, 3].set_title("GT RGB")
-            ax[3, 0].imshow(
-                torch.clamp(
-                    weighted_candy.permute(1, 2, 0).detach().squeeze().cpu(), 0.0, 1.0
-                ),
-                cmap="jet",
-            )
-            ax[3, 0].set_title("Weighted GT canny")
-            # A3d colorbar
-            ax[3, 1].imshow(
-                torch.clamp(
-                    weighted_render_candy.permute(1, 2, 0).detach().squeeze().cpu(),
-                    0.0,
-                    1.0,
-                ),
-                cmap="jet",
-            )
-            ax[3, 1].set_title("Weighted rendered canny")
-            ax[3, 2].imshow(
-                torch.clamp(diff_candy.detach().squeeze().cpu(), 0.0, 1.0), cmap="jet"
-            )
-            ax[3, 2].set_title(f"Diff Edge: {torch.round(losses['edge'])}")
-            ax[3, 3].imshow(diff_sil, cmap="jet")
-            ax[3, 3].set_title(f"Silhouette Loss: {float(losses['silhouette'])}")
-            # Turn off axis
-            for i in range(2):
-                for j in range(4):
-                    ax[i, j].axis("off")
-            # Set Title
-            if tracking:
-                suptitle = f"frame_id: {curr_data['id']}, Tracking Iteration: {training_iter}"
-            else:
-                suptitle = f"frame_id: {curr_data['id']}, Mapping Iteration: {training_iter}"
-            fig.suptitle(suptitle, fontsize=16)
-            # Figure Tight Layout
-            fig.tight_layout()
-            plot_dir = "/home/yjin/repos/BundleSDF/gs_debug_imgs"
-            os.makedirs(plot_dir, exist_ok=True)
-            current_time = datetime.datetime.now()
-            filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-            #plt.show()
-            plt.savefig(
-                os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
-            )
-            plt.close()
-
-            # plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
-            # cv2.imshow('Diff Images', plot_img)
-            # cv2.waitKey(0)
-            ## Save Tracking Loss Viz
-            # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
-            # os.makedirs(save_plot_dir, exist_ok=True)
-            # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % training_iter), bbox_inches='tight')
-            # plt.close()
-
-        weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
-
-        #TODO wandb the loss
-        msg = f'INFO: Tracking iter {training_iter}\n' if tracking else f'INFO: Mapping iter {training_iter}\n'
-        for k, v in losses.items():
-            msg += f"\t{k} loss: {v.item():.6f} weighted loss: {v.item() * loss_weights[k]:.6f}\n"
-
-
-        loss = sum(weighted_losses.values())
-        msg += f"total loss: {loss.item()}"
-        #print(msg)
-
-        seen = radius > 0
-        variables["max_2D_radius"][seen] = torch.max(
-            radius[seen], variables["max_2D_radius"][seen]
-        )
-        variables["seen"] = seen
-        weighted_losses["loss"] = loss
-
-        return loss, variables, weighted_losses
-
-
- 
     def initialize_optimizer(self, lr_dict):
         lrs = lr_dict
         param_groups = [
@@ -1094,7 +872,8 @@ class GSRunner:
                         self.params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
                         self.params["cam_trans"][..., time_idx] = rel_w2c_tran
 
-                        if not curr_data["seen"] and self.cfg_gs['add_new_gaussians']:
+                        if self.cfg_gs['add_new_gaussians']:
+                        #if not curr_data["seen"] and self.cfg_gs['add_new_gaussians']:
                             print(f"INFO: Adding new gaussians for frame {time_idx}")
                             pcl_num = self.params["means3D"].shape[0]
                             # add new gaussians
@@ -1112,11 +891,33 @@ class GSRunner:
                             print(f"INFO: Adding new gaussians done, the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
 
             optimizer = self.initialize_optimizer(lr_dict)
-            for iter in range(batch_iters):
+            for _ in range(batch_iters):
+                # TODO not working add new gaussians must before optimizer
+                # # add new gaussians every 100 iterations
+                # with torch.no_grad():
+                #     if self.cfg_gs['add_new_gaussians'] and self.gaussians_iter % self.cfg_gs['add_gaussian_dict']['every_iter'] == 0:
+                #         for curr_data in batch_data:
+                #             print(f"INFO: Adding new gaussians for frame {time_idx}")
+                #             pcl_num = self.params["means3D"].shape[0]
+                #             # add new gaussians
+                #             add_new_gaussians(
+                #                 self.params,
+                #                 self.variables,
+                #                 curr_data,
+                #                 self.cfg_gs['add_gaussian_dict']['sil_thres'],
+                #                 self.cfg_gs['add_gaussian_dict']['depth_thres'],
+                #                 time_idx,
+                #                 self.cfg_gs["mean_sq_dist_method"],
+                #                 self.cfg_gs["gaussian_distribution"],
+                #             )         
+                #             curr_data['seen'] = True
+                #             print(f"INFO: Adding new gaussians done, the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
+
                 loss, losses = self.train_once(batch_data, self.gaussians_iter)
                 loss /= len(batch_data)
                 loss.backward()
 
+                
                 if True:
                     # print the loss and gradients
                     msg = f"DEBUG: Epoch: {epoch}/{self.cfg_gs['train']['num_epochs']}, Iteration: {iter}/{batch_iters}\n"
@@ -1140,46 +941,57 @@ class GSRunner:
                 # TODO save keyframes depending on the losses
 
                 with torch.no_grad():
-                    # Prune Gaussians
-                    # if self.cfg_gs['train']["prune_gaussians"]:
-                    #     print(f"INFO: number of gaussians before pruning: {self.params['means3D'].shape[0]}")
-                    #     pcl_num = self.params["means3D"].shape[0]
-                    #     visualize_param_info(self.params)
-                    #     self.params, self.variables = prune_gaussians(
-                    #         self.params,
-                    #         self.variables,
-                    #         optimizer,
-                    #         iter,
-                    #         self.cfg_gs['train']["pruning_dict"],
-                    #     )
-                    #     print(f"INFO: Gaussian Pruning Done. the number of gaussians pruned: {pcl_num - self.params['means3D'].shape[0]}, the remaining number of gaussians: {self.params['means3D'].shape[0]}")
-                    #     msg = f"\tMore Info:\n"
-                    #     msg += f"\t\tLog Scales(mean, max, min): {self.params['log_scales'].mean().item()}, {self.params['log_scales'].max().item()}, {self.params['log_scales'].min().item()}\n"
-                    #     msg += f"\t\tLog Opacities(mean, max, min): {self.params['logit_opacities'].mean().item()}, {self.params['logit_opacities'].max().item()}, {self.params['logit_opacities'].min().item()}\n" 
-                    #     print(msg)
-                    #     visualize_param_info(self.params)
-
-                    # Gaussian-Splatting's Gradient-based Densification
-                    if self.cfg_gs['train']["use_gaussian_splatting_densification"]: 
+                    #Prune Gaussians
+                    if self.cfg_gs['train']["prune_gaussians"]:
+                        print(f"INFO: number of gaussians before pruning: {self.params['means3D'].shape[0]}")
                         pcl_num = self.params["means3D"].shape[0]
-                        self.params, self.variables = densify(
+                        self.params, self.variables = prune_gaussians(
                             self.params,
                             self.variables,
                             optimizer,
-                            iter,
-                            self.cfg_gs['train']["densify_dict"],
+                            self.gaussians_iter,
+                            self.cfg_gs['train']["pruning_dict"],
                         )
-                        print(f"INFO: Gaussian-Splatting Densification Done. the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
-                        visualize_param_info(self.params)
+                        print(f"INFO: Gaussian Pruning Done. the number of gaussians pruned: {pcl_num - self.params['means3D'].shape[0]}, the remaining number of gaussians: {self.params['means3D'].shape[0]}")
+                        msg = f"\tMore Info:\n"
+                        msg += f"\t\tLog Scales(mean, max, min): {self.params['log_scales'].mean().item()}, {self.params['log_scales'].max().item()}, {self.params['log_scales'].min().item()}\n"
+                        msg += f"\t\tLog Opacities(mean, max, min): {self.params['logit_opacities'].mean().item()}, {self.params['logit_opacities'].max().item()}, {self.params['logit_opacities'].min().item()}\n" 
+                        print(msg)
+
+                #     # Gaussian-Splatting's Gradient-based Densification
+                #     if self.cfg_gs['train']["use_gaussian_splatting_densification"]: 
+                #         pcl_num = self.params["means3D"].shape[0]
+                #         self.params, self.variables = densify(
+                #             self.params,
+                #             self.variables,
+                #             optimizer,
+                #             self.gaussians_iter,
+                #             self.cfg_gs['train']["densify_dict"],
+                #         )
+                #         print(f"INFO: Training Iteration: {self.gaussians_iter} Gaussian-Splatting Densification Done. the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
+                #         #visualize_param_info(self.params)
+
                 optimizer.zero_grad(set_to_none=True)
                 self.gaussians_iter += 1
 
-                trans_errs, rot_errs  = self.evaluate_poses()
-                wandb.log({"trans_max_err":np.max(trans_errs), "rot_max_err":np.max(rot_errs)})
+                trans_errs, rot_errs, cam_pcls = self.evaluate_poses(visualize=True)
+                #trans_errs, rot_errs = self.evaluate_poses()
 
+                if self.run_gui:
+                    with self.gui_lock:
+                        obj_pcl = self.get_xyz_rgb_params()
+                        try:
+                            pcd = np.concatenate((obj_pcl, cam_pcls), axis=0)
+
+                        except NameError as e:
+                            pcd = obj_pcl
+
+                        self.gui_dict["pointcloud"] = pcd
+
+                wandb.log({"trans_max_err":np.mean(trans_errs), "rot_max_err":np.mean(rot_errs)})
                 wandb.log(losses)
+                wandb.log({"num_pts": self.params["means3D"].shape[0]})
 
-                # denseify gaussians
             # update translation and rotation of the camera
             with torch.no_grad():
                 for curr_data in batch_data:
@@ -1266,19 +1078,19 @@ class GSRunner:
             edge = ki.filters.sobel(gray).squeeze(0)
             # edge edges
 
-            losses["edge"] += torch.abs(gt_edge - edge)[mask].mean()
+            losses["edge"] += torch.abs(gt_edge - edge)[mask].sum()
 
             # Depth loss
-            losses["depth"] += torch.abs(curr_data["depth"] - depth)[mask].mean()
+            losses["depth"] += torch.abs(curr_data["depth"] - depth)[mask].sum()
 
             # silhouette loss
-            losses["silhouette"] += torch.abs(silhouette.float() - curr_data["mask"]).mean()
+            losses["silhouette"] += torch.abs(silhouette.float() - curr_data["mask"]).sum()
 
             # color loss
             color_mask = torch.tile(mask, (3, 1, 1))
             color_mask = color_mask.detach()
 
-            rgbl1 = torch.abs(gt_im - im)[color_mask].mean()
+            rgbl1 = torch.abs(gt_im - im)[color_mask].sum()
             losses["im"] += (1-dssim_weight) * rgbl1 + dssim_weight * (1.0 - calc_ssim(im, gt_im))
 
             wandb.log(losses)
@@ -1326,9 +1138,9 @@ class GSRunner:
                 ax_im = ax[0, 1].imshow(weighted_depth[0].detach().cpu())
                 cbar = fig.colorbar(ax_im, ax=ax[0, 1])
                 ax[0, 1].set_title("Weighted GT Depth")
-                ax[1, 1].imshow(
-                    weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6
-                )
+                ax_im = ax[1, 1].imshow(
+                    weighted_render_depth[0].detach().cpu())
+                cbar = fig.colorbar(ax_im, ax=ax[1, 1])
                 ax[1, 1].set_title("Weighted Rendered Depth")
                 ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
                 ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
@@ -1410,519 +1222,3 @@ class GSRunner:
 
         weighted_losses['loss'] = loss
         return loss, weighted_losses
-
-    def train_together(self):
-        # TODO pop the earliest data
-        config = self.cfg_gs
-        params = self.params
-        variables = self.variables
-
-        #for curr_data in data_for_train:
-        while self.queued_data_for_train:
-            curr_data = self.queued_data_for_train.popleft()
-            time_idx = curr_data["id"]
-            curr_gt_w2c = curr_data["iter_gt_w2c_list"]
-
-            color = curr_data['im']
-            depth = curr_data['depth']
-            mask = curr_data['mask']
-            intrinsics = curr_data['intrinsics']
-            print(f"INFO: Training, processing frame_id : {time_idx}")
-
-            if time_idx > 0:
-                with torch.no_grad():
-                    # Get the ground truth pose relative to frame 0
-                    rel_w2c = curr_gt_w2c[-1]
-                    rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
-                    rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
-                    rel_w2c_tran = rel_w2c[:3, 3].detach()
-                    # Update the camera parameters
-                    params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
-                    params["cam_trans"][..., time_idx] = rel_w2c_tran
-
-                # tracking
-                tracking_start_time = time.time()
-
-                # reset optimizer & learning rates for tracking
-                optimizer = initialize_optimizer_sep(
-                    params, config["tracking"]["lrs"], tracking=True
-                )
-                # keep track of best candidate rotation & translation
-                candidate_cam_unnorm_rot = (
-                    params["cam_unnorm_rots"][..., time_idx].detach().clone()
-                )
-                candidate_cam_tran = params["cam_trans"][..., time_idx].detach().clone()
-                current_min_loss = float(1e20)
-
-                # tracking optimization
-                tracking_iter = 0
-                do_continue_slam = False
-                num_iters_tracking = config["tracking"]["num_iters"]
-                progress_bar = tqdm(
-                    range(num_iters_tracking), desc=f"tracking time step: {time_idx}"
-                )
-                while True:
-                    # loss for current frame
-                    loss, variables, losses = self.get_loss(
-                        params,
-                        curr_data,
-                        variables,
-                        time_idx,
-                        config["tracking"]["loss_weights"],
-                        config["tracking"]["use_sil_for_loss"],
-                        config["tracking"]["sil_thres"],
-                        config["tracking"]["use_l1"],
-                        config["tracking"]["ignore_outlier_depth_loss"],
-                        tracking=True,
-                        training_iter=tracking_iter,
-                    )
-                    if config["use_wandb"]:
-                        # report loss
-                        wandb_tracking_step = report_loss(
-                            losses, wandb_run, wandb_tracking_step, tracking=True
-                        )
-                    # backprop
-                    loss.backward()
-                    # optimizer update
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    with torch.no_grad():
-                        # save the best candidate rotation & translation
-                        if loss < current_min_loss:
-                            current_min_loss = loss
-                            candidate_cam_unnorm_rot = (
-                                params["cam_unnorm_rots"][..., time_idx].detach().clone()
-                            )
-                            candidate_cam_tran = (
-                                params["cam_trans"][..., time_idx].detach().clone()
-                            )
-                        # report progress
-                        if config["report_iter_progress"]:
-                            if config["use_wandb"]:
-                                report_progress(
-                                    params,
-                                    curr_data,
-                                    tracking_iter + 1,
-                                    progress_bar,
-                                    time_idx,
-                                    sil_thres=config["tracking"]["sil_thres"],
-                                    tracking=True,
-                                    wandb_run=wandb_run,
-                                    wandb_step=wandb_tracking_step,
-                                    wandb_save_qual=config["wandb"]["save_qual"],
-                                )
-                            else:
-                                report_progress(
-                                    params,
-                                    curr_data,
-                                    tracking_iter + 1,
-                                    progress_bar,
-                                    time_idx,
-                                    sil_thres=config["tracking"]["sil_thres"],
-                                    tracking=True,
-                                )
-                        else:
-                            progress_bar.update(1)
-                    # update the runtime numbers
-                    # check if we should stop tracking
-                    tracking_iter += 1
-                    if tracking_iter == num_iters_tracking:
-                        if (
-                            losses["depth"] < config["tracking"]["depth_loss_thres"]
-                            and config["tracking"]["use_depth_for_loss"]
-                        ):
-                            break
-                        elif (
-                            config["tracking"]["use_depth_for_loss"]
-                            and not do_continue_slam
-                        ):
-                            do_continue_slam = True
-                            progress_bar = tqdm(
-                                range(num_iters_tracking),
-                                desc=f"tracking time step: {time_idx}",
-                            )
-                            num_iters_tracking = 2 * num_iters_tracking
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "tracking/extra tracking iters frames": time_idx,
-                                        "tracking/step": wandb_time_step,
-                                    }
-                                )
-                        else:
-                            break
-
-                progress_bar.close()
-                # Copy over the best candidate rotation & translation
-                if (losses["depth"] < config["tracking"]["depth_loss_thres"] and losses["edge"] < config["tracking"]["edge_loss_thres"]):
-                    print(f"INFO: Camera Pose of frame {time_idx} Updated, new cam unnorm rots: {candidate_cam_unnorm_rot.detach().cpu()}, new cam trans: {candidate_cam_tran.detach().cpu()}")
-                    with torch.no_grad():
-                        params["cam_unnorm_rots"][..., time_idx] = candidate_cam_unnorm_rot
-                        params["cam_trans"][..., time_idx] = candidate_cam_tran
-
-                # Update the runtime numbers
-                tracking_end_time = time.time()
-                tracking_iter_time =  tracking_end_time - tracking_start_time
-               
-                print(f"INFO: Frame id: {time_idx} Tracking Ends, it takes {tracking_iter_time: .6f}s for {num_iters_tracking} iterations. \n \
-                        \tTracking loss: ")
-
-            if (
-                time_idx == 0
-                or (time_idx + 1) % config["report_global_progress_every"] == 0
-            ):
-                try:
-                    # Report Final Tracking Progress
-                    progress_bar = tqdm(
-                        range(1), desc=f"Tracking Result Time Step: {time_idx}"
-                    )
-                    with torch.no_grad():
-                        if config["use_wandb"]:
-                            report_progress(
-                                params,
-                                tracking_curr_data,
-                                1,
-                                progress_bar,
-                                iter_time_idx,
-                                sil_thres=config["tracking"]["sil_thres"],
-                                tracking=True,
-                                wandb_run=wandb_run,
-                                wandb_step=wandb_time_step,
-                                wandb_save_qual=config["wandb"]["save_qual"],
-                                global_logging=True,
-                            )
-                        else:
-                            report_progress(
-                                params,
-                                tracking_curr_data,
-                                1,
-                                progress_bar,
-                                iter_time_idx,
-                                sil_thres=config["tracking"]["sil_thres"],
-                                tracking=True,
-                            )
-                    progress_bar.close()
-                except:
-                    ckpt_output_dir = os.path.join(
-                        config["workdir"], config["run_name"]
-                    )
-                    save_params_ckpt(params, ckpt_output_dir, time_idx)
-                    print("Failed to evaluate trajectory.")
-
-            # Densification & KeyFrame-based Mapping
-            print(f"INFO: Number of Gaussians before adding new gaussians: {params['means3D'].shape[0]}")
-            print(f"INFO: lof_opacities: {torch.mean(params['logit_opacities'])}, max of opacity: {torch.max(params['logit_opacities'])}, min of opacity: {torch.min(params['logit_opacities'])}")
-            if time_idx == 0 or (time_idx + 1) % config["map_every"] == 0:
-                # Densification
-                if config["mapping"]["add_new_gaussians"] and time_idx > 0:
-                    # Add new Gaussians to the scene based on the Silhouette
-                    # TODO add masked gaussian
-                    self.add_new_gaussians(
-                        params,
-                        variables,
-                        curr_data,
-                        config["mapping"]["sil_thres"],
-                        config["mapping"]["depth_thres"],
-                        time_idx,
-                        config["mean_sq_dist_method"],
-                        config["gaussian_distribution"],
-                    )
-                    post_num_pts = params["means3D"].shape[0]
-                    if config["use_wandb"]:
-                        wandb_run.log(
-                            {
-                                "Mapping/Number of Gaussians": post_num_pts,
-                                "Mapping/step": wandb_time_step,
-                            }
-                        )
-
-                print(f"INFO: Number of Gaussians after adding new gaussians: {params['means3D'].shape[0]}")
-                print(f"INFO: lof_opacities: {torch.mean(params['logit_opacities'])}, max of opacity: {torch.max(params['logit_opacities'])}, min of opacity: {torch.min(params['logit_opacities'])}")
-                with torch.no_grad():
-                    # Get the current estimated rotation & translation
-                    curr_cam_rot = F.normalize(
-                        params["cam_unnorm_rots"][..., time_idx].detach()
-                    )
-                    curr_cam_tran = params["cam_trans"][..., time_idx].detach()
-                    curr_w2c = torch.eye(4).cuda().float()
-                    curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                    curr_w2c[:3, 3] = curr_cam_tran
-                    # Select Keyframes for Mapping
-                    num_keyframes = config["mapping_window_size"] - 2
-
-                    selected_keyframes = keyframe_selection_overlap(
-                        depth, curr_w2c, intrinsics, self.keyframe_list[:-1], num_keyframes
-                    )
-                    selected_time_idx = [
-                        self.keyframe_list[frame_idx]["id"]
-                        for frame_idx in selected_keyframes
-                    ]
-                    if len(self.keyframe_list) > 0:
-                        # Add last keyframe to the selected keyframes
-                        selected_time_idx.append(self.keyframe_list[-1]["id"])
-                        selected_keyframes.append(len(self.keyframe_list) - 1)
-                    # Add current frame to the selected keyframes
-                    selected_time_idx.append(time_idx)
-                    selected_keyframes.append(-1)
-                    # Print the selected keyframes
-                    print(
-                        f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}"
-                    )
-
-                # Reset Optimizer & Learning Rates for Full Map Optimization
-                optimizer = initialize_optimizer_sep(
-                    params, config["mapping"]["lrs"], tracking=False
-                )
-
-                # Mapping
-                mapping_start_time = time.time()
-                if config['mapping']['num_iters'] > 0:
-                    progress_bar = tqdm(
-                        range(config['mapping']['num_iters']), desc=f"Mapping Time Step: {time_idx}"
-                    )
-                for mapping_iter in range(config['mapping']['num_iters']):
-                    iter_start_time = time.time()
-                    # Randomly select a frame until current time step amongst keyframes
-                    rand_idx = np.random.randint(0, len(selected_keyframes))
-                    selected_rand_keyframe_idx = selected_keyframes[rand_idx]
-                    if selected_rand_keyframe_idx == -1:
-                        # Use Current Frame Data
-                        iter_time_idx = time_idx
-                        iter_color = color
-                        iter_depth = depth
-                        iter_mask = mask
-                    else:
-                        # Use Keyframe Data
-                        iter_time_idx = self.keyframe_list[selected_rand_keyframe_idx]["id"]
-                        iter_color = self.keyframe_list[selected_rand_keyframe_idx]["color"]
-                        iter_depth = self.keyframe_list[selected_rand_keyframe_idx]["depth"]
-                        iter_mask = self.keyframe_list[selected_rand_keyframe_idx]["mask"]
-                    #TODO should updated after tracking
-                    iter_gt_w2c = self.gt_w2c_all_frames[: iter_time_idx + 1]
-                    iter_data = {
-                        "cam": self.cam,
-                        "im": iter_color,
-                        "depth": iter_depth,
-                        "mask": iter_mask,
-                        "id": iter_time_idx,
-                        "intrinsics": intrinsics,
-                        "w2c": self.first_frame_w2c,
-                        "iter_gt_w2c_list": iter_gt_w2c,
-                    }
-                    # Loss for current frame
-                    loss, variables, losses = self.get_loss(
-                        params,
-                        iter_data,
-                        variables,
-                        iter_time_idx,
-                        config["mapping"]["loss_weights"],
-                        config["mapping"]["use_sil_for_loss"],
-                        config["mapping"]["sil_thres"],
-                        config["mapping"]["use_l1"],
-                        config["mapping"]["ignore_outlier_depth_loss"],
-                        tracking=False,
-                        do_ba=False,
-                        training_iter=mapping_iter
-                    )
-                    if config["use_wandb"]:
-                        # Report Loss
-                        wandb_mapping_step = report_loss(
-                            losses, wandb_run, wandb_mapping_step, mapping=True
-                        )
-                    # Backprop
-                    loss.backward()
-                    print(f"INFO: Number of Gaussians after mapping: {params['means3D'].shape[0]} at mapping iteration {mapping_iter}")
-                    print(f"INFO: lof_opacities: {torch.mean(params['logit_opacities'])}, max of opacity: {torch.max(params['logit_opacities'])}, min of opacity: {torch.min(params['logit_opacities'])}")
-
-                    with torch.no_grad():
-                        # Prune Gaussians
-                        pcNum1 = pcNum2 = pcNum3 = None
-                        if config["mapping"]["prune_gaussians"]:
-                            pcNum1 = int(params["means3D"].shape[0])
-                            # visualize_param_info(params)
-                            params, variables = prune_gaussians(
-                                params,
-                                variables,
-                                optimizer,
-                                mapping_iter,
-                                config["mapping"]["pruning_dict"],
-                            )
-                            pcNum2 = int(params["means3D"].shape[0])
-                            # visualize_param_info(params)
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "Mapping/Number of Gaussians - Pruning": params[
-                                            "means3D"
-                                        ].shape[0],
-                                        "Mapping/step": wandb_mapping_step,
-                                    }
-                                )
-                        # Gaussian-Splatting's Gradient-based Densification
-                        if config["mapping"]["use_gaussian_splatting_densification"]:
-                            params, variables = densify(
-                                params,
-                                variables,
-                                optimizer,
-                                mapping_iter,
-                                config["mapping"]["densify_dict"],
-                            )
-                            pcNum3 = int(params["means3D"].shape[0])
-                            # visualize_param_info(params)
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "Mapping/Number of Gaussians - Densification": params[
-                                            "means3D"
-                                        ].shape[
-                                            0
-                                        ],
-                                        "Mapping/step": wandb_mapping_step,
-                                    }
-                                )
-                        # print(f"/////////////PRUNE AND DENSIFY POINTCLOUD is DONE. origial numbers of points: {pcNum1}, pruned pcl: {pcNum2}, densiftied pcl: {pcNum3} " )
-                        # Optimizer Update
-                        optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
-
-                        # Report Progress
-                        if config["report_iter_progress"]:
-                            if config["use_wandb"]:
-                                report_progress(
-                                    params,
-                                    iter_data,
-                                    mapping_iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    wandb_run=wandb_run,
-                                    wandb_step=wandb_mapping_step,
-                                    wandb_save_qual=config["wandb"]["save_qual"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                            else:
-                                report_progress(
-                                    params,
-                                    iter_data,
-                                    mapping_iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                        else:
-                            progress_bar.update(1)
-                    # Update the runtime numbers
-                    iter_end_time = time.time()
-                    self.mapping_iter_time_sum += iter_end_time - iter_start_time
-                    self.mapping_iter_time_count += 1
-
-                # open3d vis pointcloud
-                # if time_idx % 5 == 0:
-                #     visualize_param_info(params)
-
-                if config['mapping']['num_iters'] > 0:
-                    progress_bar.close()
-                # Update the runtime numbers
-                mapping_end_time = time.time()
-                self.mapping_frame_time_sum += mapping_end_time - mapping_start_time
-                self.mapping_frame_time_count += 1
-
-                if (
-                    time_idx == 0
-                    or (time_idx + 1) % config["report_global_progress_every"] == 0
-                ):
-                    try:
-                        # Report Mapping Progress
-                        progress_bar = tqdm(
-                            range(1), desc=f"Mapping Result Time Step: {time_idx}"
-                        )
-                        with torch.no_grad():
-                            if config["use_wandb"]:
-                                report_progress(
-                                    params,
-                                    curr_data,
-                                    1,
-                                    progress_bar,
-                                    time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    wandb_run=wandb_run,
-                                    wandb_step=wandb_time_step,
-                                    wandb_save_qual=config["wandb"]["save_qual"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                    global_logging=True,
-                                )
-                            else:
-                                report_progress(
-                                    params,
-                                    curr_data,
-                                    1,
-                                    progress_bar,
-                                    time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                        progress_bar.close()
-                    except:
-                        ckpt_output_dir = os.path.join(
-                            config["workdir"], config["run_name"]
-                        )
-                        save_params_ckpt(params, ckpt_output_dir, time_idx)
-                        print("Failed to evaluate trajectory.")
-
-            # Add frame to keyframe list
-            if (
-                (
-                    (time_idx == 0)
-                    or ((time_idx + 1) % config["keyframe_every"] == 0)
-                    or (time_idx == self._total_num_frames - 2)
-                )
-                and (not torch.isinf(curr_gt_w2c[-1]).any())
-                and (not torch.isnan(curr_gt_w2c[-1]).any())
-            ):
-                with torch.no_grad():
-                    # Get the current estimated rotation & translation
-                    curr_cam_rot = F.normalize(
-                        params["cam_unnorm_rots"][..., time_idx].detach()
-                    )
-                    curr_cam_tran = params["cam_trans"][..., time_idx].detach()
-                    curr_w2c = torch.eye(4).cuda().float()
-                    curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
-                    curr_w2c[:3, 3] = curr_cam_tran
-                    # Initialize Keyframe Info
-                    curr_keyframe = {
-                        "id": time_idx,
-                        "est_w2c": curr_w2c,
-                        "color": color,
-                        "depth": depth,
-                        "mask": mask,
-                    }
-                    # Add to keyframe list
-                    self.keyframe_list.append(curr_keyframe)
-                    self.keyframe_time_indices.append(time_idx)
-
-            # Checkpoint every iteration
-            if (
-                time_idx % config["checkpoint_interval"] == 0
-                and config["save_checkpoints"]
-            ):
-                ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                save_params_ckpt(params, ckpt_output_dir, time_idx)
-                np.save(
-                    os.path.join(
-                        ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"
-                    ),
-                    np.array(keyframe_time_indices),
-                )
-
-            # Increment WandB Time Step
-            if config["use_wandb"]:
-                wandb_time_step += 1
-
-            torch.cuda.empty_cache()
-
-            #TODO logging computation time
