@@ -189,7 +189,7 @@ def fuse_pointcloud(rgbs, depths, masks, glcam_in_obs):
         #pcdAll = pcdAll.select_by_index(ind)
 
 
-    pcdAll = pcdAll.voxel_down_sample(voxel_size=0.005)
+    pcdAll = pcdAll.voxel_down_sample(voxel_size=0.0005)
     cl, ind = pcdAll.remove_statistical_outlier(nb_neighbors=100,
                                                     std_ratio=1.0)
     #cl, ind = pcdAll.remove_radius_outlier(nb_points=20, radius=0.02)
@@ -360,7 +360,7 @@ rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
-first_init_num_frames = 50 
+first_init_num_frames = 20 
 
 frame_id = first_init_num_frames
 
@@ -382,10 +382,14 @@ first_c2w[:3, 1:3] *= -1
 obj_init_pose = np.linalg.inv(first_c2w)
 
 pcd.transform(obj_init_pose)
-o3d.visualization.draw_geometries([pcd, world_coord])
+
 # transit open3d pointcloud to numpy array
 pcl = np.asarray(pcd.points)
 pcl = np.concatenate([pcl, np.asarray(pcd.colors)], axis=1)
+
+# compare gt pointcloud
+pcd_gt = fuse_pointcloud(rgbs[::5,...], depths[::5, ...], masks[::5, ...], glcam_in_obs_gt[::5, ...])
+pcd_gt.transform(obj_init_pose)
 
 gui_lock = threading.Lock()
 gui_dict = {"join": False}
@@ -399,7 +403,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    mode= 'online'
+    mode='online'
 )
 
 gsRunner = GSRunner(
@@ -410,17 +414,22 @@ gsRunner = GSRunner(
     K=K,
     poses=first_poses,
     total_num_frames=total_num_frames,
-    #pointcloud=pcl,
-    poses_gt=glcam_in_obs_gt,
+    pointcloud=pcl,
+    poses_gt=glcam_in_obs_gt.copy(),
     wandb_run=wandb_run,
     run_gui=True,
 )
 gsRunner.train()
-
 1/0
 
-with gui_lock:
-    gui_dict["pointcloud"] = gsRunner.get_xyz_rgb_params()
+opt_pcd = o3d.geometry.PointCloud()
+pcl = gsRunner.get_xyz_rgb_params()
+
+opt_pcd.points = o3d.utility.Vector3dVector(pcl[:, :3])
+opt_pcd.colors = o3d.utility.Vector3dVector(pcl[:, 3:6])
+
+
+o3d.visualization.draw([opt_pcd, pcd_gt, world_coord])
 
 
 for i in range(first_init_num_frames, total_num_frames):
@@ -432,7 +441,7 @@ for i in range(first_init_num_frames, total_num_frames):
     mask = mask.reshape(1, *mask.shape)
     pose = poses[: i + 1, ...]
     gsRunner.add_new_frames(rgb, depth, mask, pose)
-    gsRunner.train_once()
+    gsRunner.train()
     with gui_lock:
         gui_dict["pointcloud"] = gsRunner.get_xyz_rgb_params()
 
