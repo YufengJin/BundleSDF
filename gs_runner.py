@@ -478,6 +478,10 @@ class GSRunner:
 
         self.run_gui = run_gui
 
+        if wandb_run is not None:
+            self.wandb_run = wandb_run
+            self.use_wandb = True
+
         if self.run_gui:
             import threading
             self.gui_lock = threading.Lock()
@@ -491,6 +495,7 @@ class GSRunner:
         self._fisrt_c2w = poses[0].copy()
         poses = self._preprocess_poses(poses)
 
+        # convert camera pose from opengl to opencv
         poses_gt[:, :3, 1:3] = -poses_gt[:, :3, 1:3]
         self._poses_gt = poses_gt
 
@@ -562,16 +567,12 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
-    def evaluate_poses(self, system_err=None, visualize=False):
+    def evaluate_poses(self, visualize=False):
         if self._poses_gt is None:
             return None
-
         poses_gt = self._poses_gt.copy()
 
-        if system_err is not None:
-            poses = self.get_optimized_cam_poses(system_err)
-        else:
-            poses = self.get_optimized_cam_poses()
+        poses = self.get_optimized_cam_poses()
 
         assert isinstance(poses_gt, np.ndarray) and poses_gt.shape[1:] == (4, 4)
         assert isinstance(poses, np.ndarray) and poses.shape[1:] == (4, 4)
@@ -584,16 +585,16 @@ class GSRunner:
             poses_gt = poses_gt[:num_poses,...]
             assert poses_gt.shape == poses.shape
 
-            world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=.5)
+            world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=.1)
             
             poses_gt_frames = o3d.geometry.TriangleMesh()
             poses_est_frames = o3d.geometry.TriangleMesh()
             for pose_gt, pose_est in zip(poses_gt, poses):
-                cam_frame_gt = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+                cam_frame_gt = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
                 cam_frame_gt.transform(pose_gt)
                 poses_gt_frames += cam_frame_gt
 
-                cam_frame_est = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+                cam_frame_est = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
                 cam_frame_est.transform(pose_est)
                 poses_est_frames += cam_frame_est
 
@@ -605,6 +606,7 @@ class GSRunner:
 
             pcd += poses_gt_frames.sample_points_uniformly(number_of_points=10000)
             pcd += poses_est_frames.sample_points_uniformly(number_of_points=10000)
+            pcd += world_frame.sample_points_uniformly(number_of_points=10000)
 
             # pointcloud to numpy
             points = np.asarray(pcd.points)
@@ -820,8 +822,15 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
-    def initialize_optimizer(self, lr_dict):
-        lrs = lr_dict
+    def initialize_optimizer(self, lr_dict, epoch):
+        lrs = lr_dict.copy()
+        if epoch > 0:
+            lrs['means3D'] = 0.0
+            lrs['rgb_colors'] = 0.0
+            lrs['unnorm_rotations'] = 0.0
+            lrs['logit_opacities'] = 0.0
+            lrs['log_scales'] = 0.0
+
         param_groups = [
             {"params": [v], "name": k, "lr": lrs[k]} for k, v in self.params.items()
         ]
@@ -831,28 +840,38 @@ class GSRunner:
         points = self.params["means3D"].detach().cpu().numpy()
         colors = self.params["rgb_colors"].detach().cpu().numpy()
 
-        with torch.no_grad():
-            cam_rot = F.normalize(
-                self.params["cam_unnorm_rots"][..., 0].detach()
-                )
+        # alleviate the first frame error
+        # with torch.no_grad():
+        #     cam_rot = F.normalize(
+        #         self.params["cam_unnorm_rots"][..., 0].detach()
+        #         )
             
-            cam_tran = self.params["cam_trans"][..., 0].detach()
-            first_w2c_err = torch.eye(4).cuda().float()
-            first_w2c_err[:3, :3] = build_rotation(cam_rot)
-            first_w2c_err[:3, 3] = cam_tran
-            system_err = torch.linalg.inv(first_w2c_err)
+        #     cam_tran = self.params["cam_trans"][..., 0].detach()
+        #     first_w2c_err = torch.eye(4).cuda().float()
+        #     first_w2c_err[:3, :3] = build_rotation(cam_rot)
+        #     first_w2c_err[:3, 3] = cam_tran
+        #     system_err = torch.linalg.inv(first_w2c_err)
 
-        # Transform the points to the world frame
-        transform = system_err.cpu().numpy()
-        points = points @ transform[:3, :3].T + transform[:3, 3]
+        # # Transform the points to the world frame
+        # transform = system_err.cpu().numpy()
+        # points = points @ transform[:3, :3].T + transform[:3, 3]
         #center = points.mean(axis=0)
         #points = points - center
         # Create a point cloud object
         return np.concatenate((points, colors), axis=1)
 
-    def get_optimized_cam_poses(self, system_err=None):
+    def get_optimized_cam_poses(self):
         opt_cam_poses = []
         with torch.no_grad():
+            # get the first frame pose
+            cam_rot0 = F.normalize(
+                    self.params["cam_unnorm_rots"][..., 0].detach()
+                )
+            cam_tran0 = self.params["cam_trans"][..., 0].detach()
+            w2c0 = torch.eye(4).cuda().float()
+            w2c0[:3, :3] = build_rotation(cam_rot0)
+            w2c0[:3, 3] = cam_tran0
+
             # Get the current estimated rotation & translation
             for time_idx in range(self.curr_frame_id):
                 cam_rot = F.normalize(
@@ -863,9 +882,7 @@ class GSRunner:
                 w2c[:3, :3] = build_rotation(cam_rot)
                 w2c[:3, 3] = cam_tran
 
-                if system_err is not None:
-                    w2c = w2c @ system_err
-
+                #w2c = torch.linalg.inv(w2c0) @ w2c
                 w2c = torch.linalg.inv(w2c)
 
                 opt_cam_poses.append(self._fisrt_c2w @ w2c.cpu().numpy())
@@ -941,7 +958,7 @@ class GSRunner:
                             curr_data['seen'] = True
                             print(f"INFO: Adding new gaussians done, the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
 
-            optimizer = self.initialize_optimizer(lr_dict)
+            optimizer = self.initialize_optimizer(lr_dict, epoch)
             for _ in range(batch_iters):
                 # TODO not working add new gaussians must before optimizer
                 # # add new gaussians every 100 iterations
@@ -1040,18 +1057,7 @@ class GSRunner:
 
                 self.gaussians_iter += 1
 
-                with torch.no_grad():
-                    cam_rot = F.normalize(
-                        self.params["cam_unnorm_rots"][..., 0].detach()
-                        )
-                    
-                    cam_tran = self.params["cam_trans"][..., 0].detach()
-                    first_w2c_err = torch.eye(4).cuda().float()
-                    first_w2c_err[:3, :3] = build_rotation(cam_rot)
-                    first_w2c_err[:3, 3] = cam_tran
-                    system_err = torch.linalg.inv(first_w2c_err)
-
-                trans_errs, rot_errs, cam_pcls = self.evaluate_poses(system_err=system_err, visualize=True)
+                trans_errs, rot_errs, cam_pcls = self.evaluate_poses(visualize=True)
                 #trans_errs, rot_errs = self.evaluate_poses()
 
                 if self.run_gui:
@@ -1065,9 +1071,16 @@ class GSRunner:
 
                         self.gui_dict["pointcloud"] = pcd
 
-                wandb.log({"trans_max_err":np.mean(trans_errs), "rot_max_err":np.mean(rot_errs)})
-                wandb.log(losses)
-                wandb.log({"num_pts": self.params["means3D"].shape[0]})
+                # log all losses
+                if self.use_wandb:
+                    for idx, (trans_err, rot_err) in enumerate(zip(trans_errs, rot_errs)):
+                        wandb.log({f"trans_err_frame_{idx}": trans_err})
+                        wandb.log({f"rot_err_frame_{idx}": rot_err})
+
+                    wandb.log({"mean_trans_err":np.mean(trans_errs)})
+                    wandb.log({"mean_rot_err":np.mean(rot_errs)})
+                    wandb.log(losses)
+                    wandb.log({"num_pts": self.params["means3D"].shape[0]})
 
             # update translation and rotation of the camera
             with torch.no_grad():
@@ -1213,10 +1226,14 @@ class GSRunner:
             else:
                 curr_data['track_losses'].append((loss_weights['im'] * im_loss + loss_weights['depth'] * depth_loss + loss_weights['edge'] * edge_loss).item())
 
-            wandb.log(losses)
+            if self.use_wandb:
+                frame_id = curr_data["id"]
+                curr_losses = {f'im_{frame_id}': losses['im'], f'depth_{frame_id}': losses['depth'], f'edge_{frame_id}': losses['edge'], f'silhouette_{frame_id}': losses['silhouette']}
+                curr_losses[f'total_{frame_id}'] = curr_data['track_losses'][-1]
+                wandb.log(curr_losses)
             # visualize debugging images
 
-            if VIS_LOSS_IMAGE and ((iter % 49 == 0) or (iter == 0)) == 0:
+            if VIS_LOSS_IMAGE and (iter % 50 == 0):
                 # define a function which returns an image as numpy array from figure
                 fig, ax = plt.subplots(4, 4, figsize=(12, 12))
                 weighted_render_im = im * color_mask

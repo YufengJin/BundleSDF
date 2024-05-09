@@ -44,7 +44,7 @@ config = dict(
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=False,
-    add_new_gaussians=True, # add new gaussians during training         
+    add_new_gaussians=False, # add new gaussians during training         
     add_gaussian_dict=dict( # Needs to be updated based on the number of mapping iterations
         every_iter=100,
         sil_thres=0.8,
@@ -52,7 +52,7 @@ config = dict(
     ),
     train=dict(
         num_epochs=1,
-        batch_size=20,
+        batch_size=10,
         batch_iters=500,
         sil_thres=0.9,
         lrs=dict(
@@ -61,12 +61,12 @@ config = dict(
             unnorm_rotations=0.001,
             logit_opacities=0.05,
             log_scales=0.001,
-            cam_unnorm_rots=0.01,
-            cam_trans=0.001,
+            cam_unnorm_rots=0.001,
+            cam_trans=0.0001,
         ),
         loss_weights=dict(
             im=1.,
-            depth=0.,
+            depth=1.,
             edge=1.,
             silhouette=1.
         ),

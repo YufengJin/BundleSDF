@@ -228,15 +228,15 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 """
 
 # load from bop dataset
-#dataRootDir = '/home/datasets/BOP/ycbv/train_pbr/000000/'
 dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_output/bop_data/ycbv/train_pbr/000000'
-target_object_id = 5 
+#dataRootDir = '/home/datasets/BOP/ycbv/test/000048'
+target_object_id = 11 
 
 cameraInfo = json.load(open(dataRootDir + '/scene_camera.json', 'r'))
 
 # camera K is consistent
-K = np.asarray(cameraInfo['0']['cam_K'], dtype=np.float32).reshape(3, 3)
-depth_scale = np.asarray(cameraInfo['0']['depth_scale'], dtype=np.float32)
+K = np.asarray(cameraInfo['1']['cam_K'], dtype=np.float32).reshape(3, 3)
+depth_scale = np.asarray(cameraInfo['1']['depth_scale'], dtype=np.float32)
 
 scene_gt = json.load(open(dataRootDir + '/scene_gt.json', 'r'))
 
@@ -249,7 +249,7 @@ depths = []
 masks = []
 frameIds = []
 
-max_frame = 50
+max_frame = 100
 
 load_stop = False
 
@@ -287,6 +287,8 @@ for imgIdx, content in scene_gt.items():
 
             # load rgb, depth, mask
             imgId = int(imgIdx)
+            # .png for ycbv test
+            #color = np.asarray(cv2.imread(os.path.join(dataRootDir, 'rgb', f'{imgId:06d}.png')), dtype=np.uint8)[:,:, ::-1]
             color = np.asarray(cv2.imread(os.path.join(dataRootDir, 'rgb', f'{imgId:06d}.jpg')), dtype=np.uint8)[:,:, ::-1]
 
             if False:
@@ -296,7 +298,7 @@ for imgIdx, content in scene_gt.items():
                 depth[depth == 65535] = 0
 
             if mm2m:   
-                depth = depth.astype(np.float64) / 1000. / depth_scale
+                depth = depth.astype(np.float64) / 1000. #/ depth_scale
 
             mask  = np.asarray(cv2.imread(os.path.join(dataRootDir, 'mask_visib', f'{imgId:06d}_{i:06d}.png'), cv2.IMREAD_UNCHANGED), dtype=np.uint8)
 
@@ -314,6 +316,30 @@ for imgIdx, content in scene_gt.items():
             hash_object = hashlib.sha256()
             hash_object.update(id_str)
 
+            
+            if len(c2ws_gt) > 0:
+                min_degrees = 180.
+                for prev_c2w in c2ws_gt:
+                    prev_c2w_rot = prev_c2w[:3, :3]
+                    c2w_rot = c2w_gt[:3, :3]
+
+                    rotation_error_cos = 0.5 * (np.trace(np.dot(c2w_rot.T, prev_c2w_rot)) - 1.0)
+                    rotation_error_cos = min(1.0, max(-1.0, rotation_error_cos))  # Ensure value is in valid range for arccos
+                    rotation_error_rad = np.arccos(rotation_error_cos)
+                    rotation_error_deg = np.degrees(rotation_error_rad)
+                    if rotation_error_deg < min_degrees:
+                        min_degrees = rotation_error_deg
+                
+                if min_degrees < 5.0:
+                    continue
+
+            # # viusalize all data
+            # fig = plt.figure(figsize=(19, 10), dpi=200)
+            # plt.subplot(1,3,1); plt.imshow(color)
+            # plt.subplot(1,3,2); plt.imshow(depth); plt.colorbar()
+            # plt.subplot(1,3,3); plt.imshow(mask)
+            # plt.show()
+
             rgbs.append(color)
             depths.append(depth)
             masks.append(mask)
@@ -324,6 +350,7 @@ for imgIdx, content in scene_gt.items():
             frame_id += 1
     
 
+print(f"Total number of frames: {frame_id}")
 
 glcam_in_obs = np.asarray(c2ws)
 glcam_in_obs_gt = np.asarray(c2ws_gt)       
@@ -360,7 +387,7 @@ rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
-first_init_num_frames = 20 
+first_init_num_frames = 10 
 
 frame_id = first_init_num_frames
 
@@ -378,7 +405,7 @@ world_coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin
 # create initial pointcloud from RGBD
 # TODO 1. add pointcloud for gs_runner 2. understanding transformation and rescale factor works for gs_runner
 first_c2w = first_poses[0].copy()
-first_c2w[:3, 1:3] *= -1                              
+first_c2w[:3, 1:3] *= -1             # from opengl to opencv
 obj_init_pose = np.linalg.inv(first_c2w)
 
 pcd.transform(obj_init_pose)
@@ -390,6 +417,12 @@ pcl = np.concatenate([pcl, np.asarray(pcd.colors)], axis=1)
 # compare gt pointcloud
 pcd_gt = fuse_pointcloud(rgbs[::5,...], depths[::5, ...], masks[::5, ...], glcam_in_obs_gt[::5, ...])
 pcd_gt.transform(obj_init_pose)
+
+pcl_gt = np.asarray(pcd_gt.points)
+pcl_gt = np.concatenate([pcl_gt, np.asarray(pcd_gt.colors)], axis=1)
+
+# visualize pointcloud
+#o3d.visualization.draw([pcd, pcd_gt, world_coord])
 
 gui_lock = threading.Lock()
 gui_dict = {"join": False}
@@ -405,6 +438,8 @@ wandb_run = wandb.init(
     settings=wandb.Settings(start_method="fork"),
     mode='online'
 )
+
+#first_poses = glcam_in_obs_gt[:first_init_num_frames, ...]
 
 gsRunner = GSRunner(
     cfg,
@@ -428,9 +463,9 @@ pcl = gsRunner.get_xyz_rgb_params()
 opt_pcd.points = o3d.utility.Vector3dVector(pcl[:, :3])
 opt_pcd.colors = o3d.utility.Vector3dVector(pcl[:, 3:6])
 
-
 o3d.visualization.draw([opt_pcd, pcd_gt, world_coord])
 
+1/0
 
 for i in range(first_init_num_frames, total_num_frames):
     rgb = rgbs[i]
