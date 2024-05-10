@@ -38,6 +38,15 @@ year          = {2023},
     └── masks_XMem
   ```
 
+# Anaconda Environment (BundleTrack excluded)
+```
+conda create -n bundlegs python=3.10
+conda activate bundlegs
+conda install -c "nvidia/label/cuda-11.8.0" cuda-toolkit
+conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6 -c pytorch -c conda-forge
+pip install -r requirements.txt
+pip install -e submodules/simple-knn
+```
 
 # Docker/Environment setup
 - Git clone all dependencies
