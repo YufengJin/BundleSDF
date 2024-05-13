@@ -37,6 +37,7 @@ from utils.slam_helpers import (
     transformed_params2depthplussilhouette,
     transform_to_frame,
     l1_loss_v1,
+    quat_mult,
     matrix_to_quaternion,
 )
 from datasets.bundlegs_datasets import relative_transformation, datautils
@@ -47,7 +48,7 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
 # TODO 2. add keyframe selection
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
-VIS_LOSS_IMAGE = False 
+VIS_LOSS_IMAGE = True 
 
 def run_gui_thread(gui_lock, gui_dict):
     # initialize pointcloud
@@ -871,6 +872,7 @@ class GSRunner:
             w2c0 = torch.eye(4).cuda().float()
             w2c0[:3, :3] = build_rotation(cam_rot0)
             w2c0[:3, 3] = cam_tran0
+            w2c0 = w2c0.cpu().numpy()
 
             # Get the current estimated rotation & translation
             for time_idx in range(self.curr_frame_id):
@@ -1085,13 +1087,13 @@ class GSRunner:
             # update translation and rotation of the camera
             with torch.no_grad():
                 # get transformation of the first frame
-                cam0_rot = F.normalize(
+                cam_rot0 = F.normalize(
                     self.params["cam_unnorm_rots"][..., 0].detach()
                     )
-                cam0_tran = self.params["cam_trans"][..., 0].detach()
-                err = torch.eye(4).cuda().float()
-                err[:3, :3] = build_rotation(cam0_rot)
-                err[:3, 3] = cam0_tran
+                cam_trans0 = self.params["cam_trans"][..., 0].detach()
+                rel_w2c0 = torch.eye(4).cuda().float()
+                rel_w2c0[:3, :3] = build_rotation(cam_rot0)
+                rel_w2c0[:3, 3] = cam_trans0
 
                 for curr_data in batch_data:
                     time_idx = curr_data["id"]
@@ -1109,9 +1111,35 @@ class GSRunner:
                         w2c = torch.eye(4).cuda().float()
                         w2c[:3, :3] = build_rotation(cam_rot)
                         w2c[:3, 3] = cam_tran
-                        curr_data["w2c"] = w2c @ torch.linalg.inv(err)
+                        curr_data["w2c"] = torch.linalg.inv(rel_w2c0) @ w2c
 
-                # update gaussian parameters
+                # # # update gaussian parameters
+                if self.params['log_scales'].shape[1] == 1:
+                    transform_rots = False # Isotropic Gaussians
+                else:
+                    transform_rots = True # Anisotropic Gaussians
+               
+                # Get Centers and Unnorm Rots of Gaussians in World Frame 
+                pts = self.params['means3D'].detach()
+                unnorm_rots = self.params['unnorm_rotations'].detach()
+
+                transformed_gaussians = {}
+                # Transform Centers of Gaussians to Camera Frame
+                pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+                pts4 = torch.cat((pts, pts_ones), dim=1)
+                transformed_pts = (rel_w2c0 @ pts4.T).T[:, :3]
+                self.params["means3D"] = transformed_pts
+
+                if transform_rots:
+                    norm_rots = F.normalize(unnorm_rots)
+                    transformed_rots = quat_mult(cam_rot0, norm_rots)
+                    self.params['unnorm_rotations'] = transformed_rots
+                else:
+                    self.params['unnorm_rotations'] = unnorm_rots
+                
+                self.params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in self.params.items()}
+                torch.cuda.empty_cache()
+
 
             progress_bar.update(1)
 
@@ -1127,9 +1155,7 @@ class GSRunner:
             ply_path = os.path.join(work_path, run_name, "splat.ply")
 
 
-
-
-    def train_once(self, batch_data, iter, dssim_weight=0.2):
+    def train_once(self, batch_data, iter, dssim_weight=0.2, gaussians_grad=True, camera_grad=True):
         # TODO save each loss for frame
         losses = {k: torch.tensor(0.0).to(self.device) for k in ["edge", "depth", "silhouette", "im"]}
 
@@ -1141,7 +1167,7 @@ class GSRunner:
             
             # transform the gaussians to the current frame
             transformed_gaussians = transform_to_frame(
-                self.params, iter_time_idx, gaussians_grad=True, camera_grad=True
+                self.params, iter_time_idx, gaussians_grad=gaussians_grad, camera_grad=camera_grad
             )
 
             # Initialize Render Variables
@@ -1175,7 +1201,7 @@ class GSRunner:
             depth = depth_sil[0, :, :].unsqueeze(0)
             silhouette = depth_sil[1, :, :]
             presence_sil_mask = silhouette > self.cfg_gs["train"]["sil_thres"]
-            
+
             # TODO if uncertainty is necessary? depth_sq is the square of the depth
             depth_sq = depth_sil[2, :, :].unsqueeze(0)
             uncertainty = depth_sq - depth**2
@@ -1233,7 +1259,7 @@ class GSRunner:
                 wandb.log(curr_losses)
             # visualize debugging images
 
-            if VIS_LOSS_IMAGE and (iter % 50 == 0):
+            if VIS_LOSS_IMAGE and (iter % 100 == 0):
                 # define a function which returns an image as numpy array from figure
                 fig, ax = plt.subplots(4, 4, figsize=(12, 12))
                 weighted_render_im = im * color_mask
@@ -1355,6 +1381,14 @@ class GSRunner:
         weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
 
         loss = sum(weighted_losses.values())
+
+        # regularization of first frame 0
+        # cam_rot0 = F.normalize(
+        #             self.params["cam_unnorm_rots"][..., 0]
+        #             )
+        # cam_trans0 = self.params["cam_trans"][..., 0]
+        # loss += 1e10 * torch.abs(cam_rot0 - torch.tensor([1, 0, 0, 0]).to(self.device)).sum() 
+        # loss += 1e10 * torch.abs(cam_trans0 - torch.tensor([0, 0, 0]).to(self.device)).sum()
 
         weighted_losses['loss'] = loss
         return loss, weighted_losses

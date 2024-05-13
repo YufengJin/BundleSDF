@@ -230,7 +230,7 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 # load from bop dataset
 dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_output/bop_data/ycbv/train_pbr/000000'
 #dataRootDir = '/home/datasets/BOP/ycbv/test/000048'
-target_object_id = 11 
+target_object_id = 5 
 
 cameraInfo = json.load(open(dataRootDir + '/scene_camera.json', 'r'))
 
@@ -283,7 +283,7 @@ for imgIdx, content in scene_gt.items():
             # add translation and rotation error to camera pose
             if len(c2ws) > 0:
                 c2w[:3, 3] += np.random.randn(3) * noise
-                c2w[:3, :3] = c2w[:3, :3] @ cv2.Rodrigues(np.random.randn(3) * noise)[0]
+                c2w[:3, :3] = c2w[:3, :3] @ cv2.Rodrigues(np.random.randn(3) * 2 * noise)[0]
 
             # load rgb, depth, mask
             imgId = int(imgIdx)
@@ -436,7 +436,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    mode='online'
+    mode='disabled'
 )
 
 #first_poses = glcam_in_obs_gt[:first_init_num_frames, ...]
@@ -452,10 +452,9 @@ gsRunner = GSRunner(
     pointcloud=pcl,
     poses_gt=glcam_in_obs_gt.copy(),
     wandb_run=wandb_run,
-    run_gui=True,
+    #run_gui=True,
 )
 gsRunner.train()
-1/0
 
 opt_pcd = o3d.geometry.PointCloud()
 pcl = gsRunner.get_xyz_rgb_params()

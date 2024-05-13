@@ -52,8 +52,8 @@ config = dict(
     ),
     train=dict(
         num_epochs=1,
-        batch_size=10,
-        batch_iters=500,
+        batch_size=5,
+        batch_iters=1000,
         sil_thres=0.9,
         lrs=dict(
             means3D=0.0001,
@@ -67,7 +67,7 @@ config = dict(
         loss_weights=dict(
             im=1.,
             depth=1.,
-            edge=1.,
+            edge=0.,
             silhouette=1.
         ),
         prune_gaussians=True, # Prune Gaussians during Mapping
