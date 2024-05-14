@@ -189,7 +189,7 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
     return params, variables
 
 
-def densify(params, variables, optimizer, iter, densify_dict):
+def densify(params, variables, optimizer, iter, densify_dict, debug_level=0):
     # TODO modify based on dynaimc 3D gaussian
     if iter <= densify_dict['stop_after']:
         variables = accumulate_mean2d_gradient(variables)
@@ -206,8 +206,7 @@ def densify(params, variables, optimizer, iter, densify_dict):
             padded_grad = torch.zeros(num_pts, device="cuda")
             padded_grad[:grads.shape[0]] = grads
             to_split = torch.logical_and(padded_grad >= grad_thresh,
-                                         torch.max(torch.exp(params['log_scales']), dim=1).values > 0.01 * variables[
-                                             'scene_radius'])
+                                         torch.max(torch.exp(params['log_scales']), dim=1).values > 0.01 * variables['scene_radius'])
             n = densify_dict['num_to_split_into']  # number to split into
             new_params = {k: v[to_split].repeat(n, 1) for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans']}
             stds = torch.exp(params['log_scales'])[to_split].repeat(n, 3)
@@ -231,11 +230,14 @@ def densify(params, variables, optimizer, iter, densify_dict):
                 remove_threshold = densify_dict['removal_opacity_threshold']
             to_remove = (torch.sigmoid(params['logit_opacities']) < remove_threshold).squeeze()
             if iter >= densify_dict['remove_big_after']:
-                big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.01 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
             params, variables = remove_points(to_remove, params, variables, optimizer)
 
             torch.cuda.empty_cache()
+
+            if debug_level > 0:
+                print(f"[DEBUG] Number of 3D Gaussians: {params['means3D'].shape[0]}, {to_clone.sum()} cloned, {to_split.sum()} split and {to_remove.sum()} removed.")
 
         # Reset Opacities for all Gaussians (This is not desired for mapping on only current frame)
         if iter > 0 and iter % densify_dict['reset_opacities_every'] == 0 and densify_dict['reset_opacities']:

@@ -48,7 +48,7 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
 # TODO 2. add keyframe selection
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
-VIS_LOSS_IMAGE = True 
+DEBUG_LEVEL = 0
 
 def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
     # initialize pointcloud
@@ -127,7 +127,7 @@ def evaluate_batch_pose_error(poses_gt, poses_est):
         rotation_errors[i] = rotation_error_deg
     
 
-    if True:
+    if DEBUG_LEVEL > 0:
         print(f"DEBUG: Pose Estimation Evlaution: \nTranslation Error:\n \
               \tFull Trans Error: {translation_errors} \n \
               \tMean: {np.mean(translation_errors):.4f}, Variance: {np.var(translation_errors):.4f}  \n \
@@ -150,6 +150,20 @@ def visualize_camera_poses(c2ws):
         camFrames += cam_frame
         
     o3d.visualization.draw_geometries([world_frame, camFrames])
+
+def visualize_gaussians(points, scale):
+    cm = plt.get_cmap("gist_rainbow")
+    assert points.shape[1] == 3 and points.shape[0] == scale.shape[0]
+
+    pcl = o3d.geometry.PointCloud()
+    pcl.points = o3d.utility.Vector3dVector(points)
+
+    # normalize scale
+    scale = (scale - scale.min()) / (scale.max() - scale.min())
+    colors = cm(scale)
+
+    pcl.colors = o3d.utility.Vector3dVector(colors[..., :3])
+    return pcl
 
 def visualize_param_info(params):
     pcl = o3d.geometry.PointCloud()
@@ -468,9 +482,11 @@ def initialize_optimizer_sep(params, lrs_dict, tracking):
     else:
         return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
+EXPERIMENT_WS = "/home/yjin/repos/BundleSDF/experiments/gs"
+
 class GSRunner:
     def __init__(
-        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, pointcloud_gt=None, poses_gt=None, wandb_run=None, run_gui=False):
+        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, pointcloud_gt=None, poses_gt=None, wandb_run=None, run_gui=False,):
         # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
         # TODO check poses c2w or obs_in_cam, z axis
         # preprocess data -> to tensor
@@ -481,6 +497,12 @@ class GSRunner:
 
         self._offset = offset
         self._scale = scale
+
+        self.debug_level = cfg_gs["debug_level"]
+        
+        # update debug level global
+        global DEBUG_LEVEL
+        DEBUG_LEVEL = self.debug_level
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
 
@@ -729,7 +751,7 @@ class GSRunner:
         center_pcl = torch.mean(init_pt_cld[:, :3], dim=0)
         radius = torch.norm(init_pt_cld[:, :3] - center_pcl, dim=1).max()
         # Initialize an estimate of scene radius for Gaussian-Splatting Densification, TODO understanding variables scene_radius
-        variables["scene_radius"] = 1.5 * radius 
+        variables["scene_radius"] = 2.5 * radius 
 
         self.params = params
         self.variables = variables
@@ -836,15 +858,11 @@ class GSRunner:
                 
 
     def initialize_optimizer(self, lr_dict, epoch):
+
         lrs = lr_dict.copy()
         if epoch > 0:
-            lrs['means3D'] = 0.0
-            lrs['rgb_colors'] = 0.0
-            lrs['unnorm_rotations'] = 0.0
-            lrs['logit_opacities'] = 0.0
-            lrs['log_scales'] = 0.0
-            lrs["cam_unnorm_rots"] = lrs["cam_unnorm_rots"] / 100.
-            lrs["cam_trans"] = lrs['cam_trans'] / 100.
+            lrs["cam_unnorm_rots"] = lrs["cam_unnorm_rots"]/10.
+            lrs["cam_trans"] = lrs['cam_trans']/10.
 
         param_groups = [
             {"params": [v], "name": k, "lr": lrs[k]} for k, v in self.params.items()
@@ -945,8 +963,6 @@ class GSRunner:
                 for curr_data in batch_data:
                     time_idx = curr_data["id"]
                     rel_w2c = curr_data["w2c"]
-                    # print("//////////////////////DEBUG//////////////////////")
-                    # print(f"w2c of frame {time_idx}: {rel_w2c}")
                     if time_idx > 0:
                         # update initial pose relative to frame 0
                         rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
@@ -972,32 +988,13 @@ class GSRunner:
                                 self.cfg_gs["gaussian_distribution"],
                             )         
                             curr_data['seen'] = True
-                            print(f"INFO: Adding new gaussians done, the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
+
+                            if self.debug_level > 0:
+                                print(f"DEBUG: Adding new gaussians done, the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
 
             optimizer = self.initialize_optimizer(lr_dict, epoch)
-            for _ in range(batch_iters):
-                # TODO not working add new gaussians must before optimizer
-                # # add new gaussians every 100 iterations
-                # with torch.no_grad():
-                #     if self.cfg_gs['add_new_gaussians'] and self.gaussians_iter % self.cfg_gs['add_gaussian_dict']['every_iter'] == 0:
-                #         for curr_data in batch_data:
-                #             print(f"INFO: Adding new gaussians for frame {time_idx}")
-                #             pcl_num = self.params["means3D"].shape[0]
-                #             # add new gaussians
-                #             add_new_gaussians(
-                #                 self.params,
-                #                 self.variables,
-                #                 curr_data,
-                #                 self.cfg_gs['add_gaussian_dict']['sil_thres'],
-                #                 self.cfg_gs['add_gaussian_dict']['depth_thres'],
-                #                 time_idx,
-                #                 self.cfg_gs["mean_sq_dist_method"],
-                #                 self.cfg_gs["gaussian_distribution"],
-                #             )         
-                #             curr_data['seen'] = True
-                #             print(f"INFO: Adding new gaussians done, the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
-
-                loss, losses = self.train_once(batch_data, self.gaussians_iter)
+            for iter in range(batch_iters):
+                loss, losses = self.train_once(batch_data, self.gaussians_iter, tracking=True, opt_both=True)
                 loss /= len(batch_data)
 
                 # minimize systematic error for fisrt frame
@@ -1008,9 +1005,8 @@ class GSRunner:
                 # losses["offset_loss"] = 1e5 * offset_loss
 
                 loss.backward()
-
                 
-                if True:
+                if self.debug_level > 0:
                     # print the loss and gradients
                     msg = f"DEBUG: Epoch: {epoch}/{self.cfg_gs['train']['num_epochs']}, Iteration: {iter}/{batch_iters}\n"
                     losses_msg = f"\tTotal Loss: {loss.item()}\n"
@@ -1021,6 +1017,8 @@ class GSRunner:
 
                     grad_msg = f"\tGradients:\n"
                     for k, v in self.params.items():
+                        if v.grad is None:
+                            continue
                         grad_msg += f"\t{k} grad(mean, max, min): {v.grad.mean().item()}, {v.grad.max().item()}, {v.grad.min().item()}\n"
                 
                     msg += grad_msg
@@ -1037,42 +1035,74 @@ class GSRunner:
                 optimizer.step()
                 # TODO save keyframes depending on the losses
 
+
                 with torch.no_grad():
                     #Prune Gaussians
                     # TODO think prune iteration self.gaussians_iter or batch iter?
                     if self.cfg_gs['train']["prune_gaussians"]:
-                        print(f"INFO: number of gaussians before pruning: {self.params['means3D'].shape[0]}")
                         pcl_num = self.params["means3D"].shape[0]
-                        self.params, self.variables = prune_gaussians(
+                        self.params, self.variables =prune_gaussians(
                             self.params,
                             self.variables,
                             optimizer,
                             self.gaussians_iter,
                             self.cfg_gs['train']["pruning_dict"],
                         )
-                        print(f"INFO: Gaussian Pruning Done. the number of gaussians pruned: {pcl_num - self.params['means3D'].shape[0]}, the remaining number of gaussians: {self.params['means3D'].shape[0]}")
-                        msg = f"\tMore Info:\n"
-                        msg += f"\t\tLog Scales(mean, max, min): {self.params['log_scales'].mean().item()}, {self.params['log_scales'].max().item()}, {self.params['log_scales'].min().item()}\n"
-                        msg += f"\t\tLog Opacities(mean, max, min): {self.params['logit_opacities'].mean().item()}, {self.params['logit_opacities'].max().item()}, {self.params['logit_opacities'].min().item()}\n" 
-                        print(msg)
+                        if self.debug_level > 0:
+                            print(f"INFO: Gaussian Pruning Done. the number of gaussians pruned: {pcl_num - self.params['means3D'].shape[0]}, the remaining number of gaussians: {self.params['means3D'].shape[0]}")
+                            msg = f"\tMore Info:\n"
+                            msg += f"\t\tLog Scales(mean, max, min): {self.params['log_scales'].mean().item()}, {self.params['log_scales'].max().item()}, {self.params['log_scales'].min().item()}\n"
+                            msg += f"\t\tLog Opacities(mean, max, min): {self.params['logit_opacities'].mean().item()}, {self.params['logit_opacities'].max().item()}, {self.params['logit_opacities'].min().item()}\n" 
+                            print(msg)
 
-                #     # Gaussian-Splatting's Gradient-based Densification
-                #     if self.cfg_gs['train']["use_gaussian_splatting_densification"]: 
-                #         pcl_num = self.params["means3D"].shape[0]
-                #         self.params, self.variables = densify(
-                #             self.params,
-                #             self.variables,
-                #             optimizer,
-                #             self.gaussians_iter,
-                #             self.cfg_gs['train']["densify_dict"],
-                #         )
-                #         print(f"INFO: Training Iteration: {self.gaussians_iter} Gaussian-Splatting Densification Done. the number of gaussians added: {self.params['means3D'].shape[0] - pcl_num}")
-                #         #visualize_param_info(self.params)
+
+                    #Gaussian-Splatting's Gradient-based Densification
+                    if self.cfg_gs['train']["use_gaussian_splatting_densification"]: 
+                        self.params, self.variables = densify(
+                            self.params,
+                            self.variables,
+                            optimizer,
+                            self.gaussians_iter,
+                            self.cfg_gs['train']["densify_dict"],
+                            debug_level=self.debug_level,
+                        )
 
                 optimizer.zero_grad(set_to_none=True)
 
-                self.gaussians_iter += 1
+                # visualize all info of gaussians
+                if self.debug_level > 2 and self.gaussians_iter % 20 == 0:
+                    grads = self.variables['means2D_gradient_accum'] / self.variables['denom']
+                    grads[grads.isnan()] = 0.0
 
+                    max_scales = torch.max(torch.exp(self.params['log_scales']), dim=1).values
+                    opacities = torch.sigmoid(self.params['logit_opacities']).squeeze(1)
+
+                
+                    grads = grads.detach().cpu().numpy()
+                    max_scales = max_scales.detach().cpu().numpy()
+                    opacities = opacities.detach().cpu().numpy()
+                    points = self.params['means3D'].detach().cpu().numpy()
+
+                    grad_pcd = visualize_gaussians(points, grads)
+                    sca_pcd = visualize_gaussians(points, max_scales)
+                    opa_pcd = visualize_gaussians(points, opacities)
+
+                
+                    # plt hist of grad max_scale, opacities
+                    plt.clf()
+                    plt.subplot(1, 3, 1); plt.hist(grads, bins=100); plt.title("Grad")
+                    plt.subplot(1, 3, 2); plt.hist(max_scales, bins=100); plt.title("Max Scales")
+                    plt.subplot(1, 3, 3); plt.hist(opacities, bins=100); plt.title("Opacities")
+                    ws = os.path.join(self.cfg_gs['workdir'], self.cfg_gs['run_name'], "gs_params_hist")
+                    if not os.path.exists(ws):
+                        os.makedirs(ws)
+                    plt.savefig(os.path.join(ws, f"iter_{self.gaussians_iter}.png"))
+
+                    plt.close()
+
+                    #o3d.visualization.draw([grad_pcd, sca_pcd, opa_pcd])
+
+                self.gaussians_iter += 1
                 trans_errs, rot_errs, cam_pcls = self.evaluate_poses(visualize=True)
                 #trans_errs, rot_errs = self.evaluate_poses()
 
@@ -1165,10 +1195,10 @@ class GSRunner:
             rgbs = params['rgb_colors']
             opacities = params['logit_opacities']
 
-            ply_path = os.path.join(work_path, run_name, "splat.ply")
+            ply_path = os.path.join(self.cfg_gs['workdir'], self.cfg_gs['run_name'], "splats.ply")
 
 
-    def train_once(self, batch_data, iter, dssim_weight=0.2, gaussians_grad=True, camera_grad=True):
+    def train_once(self, batch_data, iter, dssim_weight=0.2, tracking=False, opt_both=True):
         # TODO save each loss for frame
         losses = {k: torch.tensor(0.0).to(self.device) for k in ["edge", "depth", "silhouette", "im"]}
 
@@ -1179,9 +1209,22 @@ class GSRunner:
             iter_time_idx = curr_data["id"]
             
             # transform the gaussians to the current frame
-            transformed_gaussians = transform_to_frame(
-                self.params, iter_time_idx, gaussians_grad=gaussians_grad, camera_grad=camera_grad
-            )
+            if not tracking:
+                if opt_both:
+                    # optimize both camera and gaussians
+                    transformed_gaussians = transform_to_frame(
+                        self.params, iter_time_idx, gaussians_grad=True, camera_grad=True
+                    )
+
+                else:
+                    # optimize only gaussians
+                    transformed_gaussians = transform_to_frame(
+                        self.params, iter_time_idx, gaussians_grad=True, camera_grad=False
+                    )
+            else:
+                transformed_gaussians = transform_to_frame(
+                    self.params, iter_time_idx, gaussians_grad=False, camera_grad=True
+                )
 
             # Initialize Render Variables
             rendervar = transformed_params2rendervar(self.params, transformed_gaussians)
@@ -1215,12 +1258,8 @@ class GSRunner:
             silhouette = depth_sil[1, :, :]
             presence_sil_mask = silhouette > self.cfg_gs["train"]["sil_thres"]
 
-            # TODO if uncertainty is necessary? depth_sq is the square of the depth
-            depth_sq = depth_sil[2, :, :].unsqueeze(0)
-            uncertainty = depth_sq - depth**2
-            uncertainty = uncertainty.detach()
             # M    ask with valid depth values (accounts for outlier depth values)
-            nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
+            nan_mask = (~torch.isnan(depth))
 
             mask_gt = curr_data["mask"].bool()
             gt_im = curr_data["im"] 
@@ -1232,30 +1271,39 @@ class GSRunner:
 
             # sobel edges
             gt_edge = ki.filters.sobel(gt_gray).squeeze(0)
-            # canny edges
+            # canny edges TODO ablation test
             # gt_edge= ki.filters.canny(gt_gray)[0]
 
             gray = ki.color.rgb_to_grayscale(im.unsqueeze(0))
 
             # sobel edges
             edge = ki.filters.sobel(gray).squeeze(0)
-            
+                
             # edge loss
-            edge_loss = torch.abs(gt_edge - edge)[mask].sum()
-            losses["edge"] += edge_loss
+            if not tracking:
+                edge_loss = torch.tensor(0.0).to(self.device)
+            else:
+                edge_loss = torch.abs(gt_edge - edge).sum()
 
+            losses["edge"] += edge_loss
+            
             # Depth loss
-            depth_loss = torch.abs(curr_data["depth"] - depth)[mask].sum()
+            if not tracking:
+                depth_loss = torch.abs(curr_data["depth"] - depth)[mask].mean()
+            else:
+                depth_loss = torch.abs(curr_data["depth"] - depth)[mask].sum()
+
             losses["depth"] += depth_loss
 
             # silhouette loss
-            losses["silhouette"] += torch.abs(silhouette.float() - curr_data["mask"]).sum()
+            if not tracking:
+                losses["silhouette"] += torch.abs(silhouette.float() - curr_data["mask"]).mean()
 
             # color loss
             color_mask = torch.tile(mask, (3, 1, 1))
             color_mask = color_mask.detach()
 
-            rgbl1 = torch.abs(gt_im - im)[color_mask].sum()
+            rgbl1 = torch.abs(gt_im - im)[color_mask].mean()
             im_loss = (1-dssim_weight) * rgbl1 + dssim_weight * (1.0 - calc_ssim(im, gt_im))
             losses["im"] += im_loss
 
@@ -1270,16 +1318,16 @@ class GSRunner:
                 curr_losses = {f'im_{frame_id}': losses['im'], f'depth_{frame_id}': losses['depth'], f'edge_{frame_id}': losses['edge'], f'silhouette_{frame_id}': losses['silhouette']}
                 curr_losses[f'total_{frame_id}'] = curr_data['track_losses'][-1]
                 wandb.log(curr_losses)
-            # visualize debugging images
 
-            if VIS_LOSS_IMAGE and (iter % 100 == 0):
+            # visualize debugging images
+            if self.debug_level > 1 and (iter % 50 == 0):
                 # define a function which returns an image as numpy array from figure
                 fig, ax = plt.subplots(4, 4, figsize=(12, 12))
                 weighted_render_im = im * color_mask
                 weighted_im = curr_data["im"] * color_mask
                 weighted_render_depth = depth * mask
                 weighted_depth = curr_data["depth"] * mask
-                weighted_render_candy = (edge * mask)
+                weighted_render_candy = (edge * mask) 
                 weighted_candy = (gt_edge * mask)
                 viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
 
@@ -1330,10 +1378,6 @@ class GSRunner:
                 ax[1, 3].set_title("Loss Mask")
                 ax[2, 0].imshow(curr_data["mask"].detach().squeeze().cpu())
                 ax[2, 0].set_title("gt Mask")
-                ax_im = ax[2, 1].imshow(depth_sq.detach().squeeze().cpu())
-                # Add colorbar
-                cbar = fig.colorbar(ax_im, ax=ax[2, 1])
-                ax[2, 1].set_title("uncertainty mask")
                 ax[2, 2].imshow(
                     (im.permute(1, 2, 0).detach().squeeze().cpu().numpy() * 255).astype(
                         np.uint8
@@ -1374,8 +1418,10 @@ class GSRunner:
                 fig.suptitle(suptitle, fontsize=16)
                 # Figure Tight Layout
                 fig.tight_layout()
-                plot_dir = "/home/yjin/repos/BundleSDF/gs_debug_imgs"
-                os.makedirs(plot_dir, exist_ok=True)
+                plot_dir = os.path.join(self.cfg_gs['workdir'], self.cfg_gs['run_name'],'gs_loss_plots') 
+                if not os.path.exists(plot_dir):
+                    os.makedirs(plot_dir)
+
                 current_time = datetime.datetime.now()
                 filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
                 #plt.show()

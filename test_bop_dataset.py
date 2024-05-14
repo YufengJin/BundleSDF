@@ -387,7 +387,7 @@ rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
-first_init_num_frames = 20 
+first_init_num_frames = 20
 
 frame_id = first_init_num_frames
 
@@ -409,16 +409,31 @@ first_c2w[:3, 1:3] *= -1             # from opengl to opencv
 obj_init_pose = np.linalg.inv(first_c2w)
 
 pcd.transform(obj_init_pose)
+pcd = pcd.voxel_down_sample(voxel_size=0.001)
 
 # transit open3d pointcloud to numpy array
 pcl = np.asarray(pcd.points)
 pcl = np.concatenate([pcl, np.asarray(pcd.colors)], axis=1)
 
+# create initial pointcloud in unit scale
+bbox = pcd.get_oriented_bounding_box()
+center = bbox.center
+extent = bbox.extent.max() * 1.5 # leave some margin
+
+N_points = 10000
+points = np.random.rand(N_points, 3) * extent - extent / 2
+points += center
+
+colors = np.random.rand(N_points, 3)
+
+pcl_random = np.concatenate([points, colors], axis=1)
+
+
 # compare gt pointcloud
 pcd_gt = fuse_pointcloud(rgbs[::5,...], depths[::5, ...], masks[::5, ...], glcam_in_obs_gt[::5, ...])
 pcd_gt.transform(obj_init_pose)
 
-pcd_gt = pcd_gt.voxel_down_sample(voxel_size=0.005)
+pcd_gt = pcd_gt.voxel_down_sample(voxel_size=0.001)
 
 pcl_gt = np.asarray(pcd_gt.points)
 pcl_gt = np.concatenate([pcl_gt, np.asarray(pcd_gt.colors)], axis=1)
@@ -438,7 +453,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    mode='disabled'
+    #mode='disabled'
 )
 
 #first_poses = glcam_in_obs_gt[:first_init_num_frames, ...]
@@ -451,8 +466,8 @@ gsRunner = GSRunner(
     K=K,
     poses=first_poses,
     total_num_frames=total_num_frames,
-    pointcloud=pcl,
-    pointcloud_gt=pcl_gt,
+    pointcloud=pcl_gt,
+    #pointcloud_gt=pcl_gt,
     poses_gt=glcam_in_obs_gt.copy(),
     wandb_run=wandb_run,
     run_gui=True,
