@@ -283,7 +283,7 @@ for imgIdx, content in scene_gt.items():
             # add translation and rotation error to camera pose
             if len(c2ws) > 0:
                 c2w[:3, 3] += np.random.randn(3) * noise
-                c2w[:3, :3] = c2w[:3, :3] @ cv2.Rodrigues(np.random.randn(3) * 2 * noise)[0]
+                c2w[:3, :3] = c2w[:3, :3] @ cv2.Rodrigues(np.random.randn(3) * noise)[0]
 
             # load rgb, depth, mask
             imgId = int(imgIdx)
@@ -387,7 +387,7 @@ rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
-first_init_num_frames = 5 
+first_init_num_frames = 20 
 
 frame_id = first_init_num_frames
 
@@ -417,6 +417,8 @@ pcl = np.concatenate([pcl, np.asarray(pcd.colors)], axis=1)
 # compare gt pointcloud
 pcd_gt = fuse_pointcloud(rgbs[::5,...], depths[::5, ...], masks[::5, ...], glcam_in_obs_gt[::5, ...])
 pcd_gt.transform(obj_init_pose)
+
+pcd_gt = pcd_gt.voxel_down_sample(voxel_size=0.005)
 
 pcl_gt = np.asarray(pcd_gt.points)
 pcl_gt = np.concatenate([pcl_gt, np.asarray(pcd_gt.colors)], axis=1)
@@ -449,14 +451,16 @@ gsRunner = GSRunner(
     K=K,
     poses=first_poses,
     total_num_frames=total_num_frames,
-    #pointcloud=pcl,
+    pointcloud=pcl,
+    pointcloud_gt=pcl_gt,
     poses_gt=glcam_in_obs_gt.copy(),
     wandb_run=wandb_run,
     run_gui=True,
 )
+
+# save trained gaussian model
 gsRunner.train()
 1/0
-
 opt_pcd = o3d.geometry.PointCloud()
 pcl = gsRunner.get_xyz_rgb_params()
 
@@ -464,7 +468,6 @@ opt_pcd.points = o3d.utility.Vector3dVector(pcl[:, :3])
 opt_pcd.colors = o3d.utility.Vector3dVector(pcl[:, 3:6])
 
 o3d.visualization.draw([opt_pcd, pcd_gt, world_coord])
-
 1/0
 
 for i in range(first_init_num_frames, total_num_frames):

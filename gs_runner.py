@@ -54,7 +54,8 @@ def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
     # initialize pointcloud
     if inital_pointcloud is not None:
         points = inital_pointcloud[:, :3]
-        colors = inital_pointcloud[:, 3:6]
+        colors = np.zeros_like(points)
+        colors[:, 0] = 1
     else:
         num_points = 1000
         points = np.random.rand(num_points, 3)
@@ -842,8 +843,8 @@ class GSRunner:
             lrs['unnorm_rotations'] = 0.0
             lrs['logit_opacities'] = 0.0
             lrs['log_scales'] = 0.0
-	    lrs["cam_unnorm_rots"] = lrs["cam_unnorm_rots"] / 10.
-            lrs["cam_trans"] = lrs['cam_trans'] / 10.
+            lrs["cam_unnorm_rots"] = lrs["cam_unnorm_rots"] / 100.
+            lrs["cam_trans"] = lrs['cam_trans'] / 100.
 
         param_groups = [
             {"params": [v], "name": k, "lr": lrs[k]} for k, v in self.params.items()
@@ -885,7 +886,6 @@ class GSRunner:
             w2c0 = torch.eye(4).cuda().float()
             w2c0[:3, :3] = build_rotation(cam_rot0)
             w2c0[:3, 3] = cam_tran0
-            w2c0 = w2c0.cpu().numpy()
 
             # Get the current estimated rotation & translation
             for time_idx in range(self.curr_frame_id):
@@ -897,7 +897,7 @@ class GSRunner:
                 w2c[:3, :3] = build_rotation(cam_rot)
                 w2c[:3, 3] = cam_tran
 
-                #w2c = torch.linalg.inv(w2c0) @ w2c
+                #w2c = w2c @ torch.linalg.inv(w2c0)
                 w2c = torch.linalg.inv(w2c)
 
                 opt_cam_poses.append(self._fisrt_c2w @ w2c.cpu().numpy())
@@ -1111,21 +1111,21 @@ class GSRunner:
 
                 for curr_data in batch_data:
                     time_idx = curr_data["id"]
-                    if time_idx > 0:
-                        cam_rot = F.normalize(
-                            self.params["cam_unnorm_rots"][..., time_idx].detach()
-                            )
+                    #if time_idx > 0:
+                    cam_rot = F.normalize(
+                        self.params["cam_unnorm_rots"][..., time_idx].detach()
+                        )
                     
-                        cam_tran = self.params["cam_trans"][..., time_idx].detach()
+                    cam_tran = self.params["cam_trans"][..., time_idx].detach()
 
-                        # update the camera pose, relative to the first frame
-                        # TODO remove redundant code
-                        self.params["cam_unnorm_rots"][..., time_idx] = cam_rot
+                    # update the camera pose, relative to the first frame
+                    # TODO remove redundant code
+                    self.params["cam_unnorm_rots"][..., time_idx] = cam_rot
 
-                        w2c = torch.eye(4).cuda().float()
-                        w2c[:3, :3] = build_rotation(cam_rot)
-                        w2c[:3, 3] = cam_tran
-                        curr_data["w2c"] = torch.linalg.inv(rel_w2c0) @ w2c
+                    w2c = torch.eye(4).cuda().float()
+                    w2c[:3, :3] = build_rotation(cam_rot)
+                    w2c[:3, 3] = cam_tran
+                    curr_data["w2c"] = torch.linalg.inv(rel_w2c0) @ w2c
 
                 # # # update gaussian parameters
                 if self.params['log_scales'].shape[1] == 1:
@@ -1153,7 +1153,6 @@ class GSRunner:
                 
                 self.params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in self.params.items()}
                 torch.cuda.empty_cache()
-
 
             progress_bar.update(1)
 

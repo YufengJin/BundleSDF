@@ -51,9 +51,9 @@ config = dict(
         depth_thres=0.01,
     ),
     train=dict(
-        num_epochs=1,
-        batch_size=5,
-        batch_iters=1000,
+        num_epochs=2,
+        batch_size=10,
+        batch_iters=500,
         sil_thres=0.9,
         lrs=dict(
             means3D=0.0001,
@@ -61,8 +61,8 @@ config = dict(
             unnorm_rotations=0.001,
             logit_opacities=0.05,
             log_scales=0.001,
-            cam_unnorm_rots=0.001,
-            cam_trans=0.0001,
+            cam_unnorm_rots=0.01,
+            cam_trans=0.001,
         ),
         loss_weights=dict(
             im=1.,
