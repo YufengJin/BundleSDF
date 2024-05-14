@@ -387,7 +387,7 @@ rgbs, depths, masks, poses = preprocess_data(rgbs, depths, masks, glcam_in_obs)
 
 total_num_frames = len(rgbs)
 print(f"Total number of frames: {total_num_frames}")
-first_init_num_frames = 10 
+first_init_num_frames = 5 
 
 frame_id = first_init_num_frames
 
@@ -449,12 +449,13 @@ gsRunner = GSRunner(
     K=K,
     poses=first_poses,
     total_num_frames=total_num_frames,
-    pointcloud=pcl,
+    #pointcloud=pcl,
     poses_gt=glcam_in_obs_gt.copy(),
     wandb_run=wandb_run,
-    #run_gui=True,
+    run_gui=True,
 )
 gsRunner.train()
+1/0
 
 opt_pcd = o3d.geometry.PointCloud()
 pcl = gsRunner.get_xyz_rgb_params()
@@ -476,9 +477,16 @@ for i in range(first_init_num_frames, total_num_frames):
     pose = poses[: i + 1, ...]
     gsRunner.add_new_frames(rgb, depth, mask, pose)
     gsRunner.train()
-    with gui_lock:
-        gui_dict["pointcloud"] = gsRunner.get_xyz_rgb_params()
 
+opt_pcd = o3d.geometry.PointCloud()
+pcl = gsRunner.get_xyz_rgb_params()
+
+opt_pcd.points = o3d.utility.Vector3dVector(pcl[:, :3])
+opt_pcd.colors = o3d.utility.Vector3dVector(pcl[:, 3:6])
+
+
+o3d.visualization.draw([opt_pcd, pcd_gt, world_coord])
+1/0
 with gui_lock:
     gui_dict['join'] = True
 

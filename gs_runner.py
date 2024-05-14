@@ -50,11 +50,15 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
 VIS_LOSS_IMAGE = True 
 
-def run_gui_thread(gui_lock, gui_dict):
+def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
     # initialize pointcloud
-    num_points = 1000
-    points = np.random.rand(num_points, 3)
-    colors = np.random.rand(num_points, 3)
+    if inital_pointcloud is not None:
+        points = inital_pointcloud[:, :3]
+        colors = inital_pointcloud[:, 3:6]
+    else:
+        num_points = 1000
+        points = np.random.rand(num_points, 3)
+        colors = np.random.rand(num_points, 3)
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
@@ -79,6 +83,8 @@ def run_gui_thread(gui_lock, gui_dict):
             break
 
         if new_pcd is not None:
+            if inital_pointcloud is not None:
+                new_pcd = np.concatenate([inital_pointcloud, new_pcd], axis=0)
             pcd.points = o3d.utility.Vector3dVector(new_pcd[:, :3])
             pcd.colors = o3d.utility.Vector3dVector(new_pcd[:, 3:6])
 
@@ -463,7 +469,7 @@ def initialize_optimizer_sep(params, lrs_dict, tracking):
 
 class GSRunner:
     def __init__(
-        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, poses_gt=None, wandb_run=None, run_gui=False):
+        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, pointcloud_gt=None, poses_gt=None, wandb_run=None, run_gui=False):
         # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
         # TODO check poses c2w or obs_in_cam, z axis
         # preprocess data -> to tensor
@@ -487,7 +493,7 @@ class GSRunner:
             import threading
             self.gui_lock = threading.Lock()
             self.gui_dict = {"join": False}
-            gui_runner = threading.Thread(target=run_gui_thread, args=(self.gui_lock, self.gui_dict))
+            gui_runner = threading.Thread(target=run_gui_thread, args=(self.gui_lock, self.gui_dict, pointcloud_gt))
             gui_runner.start()
 
         #from opengl to opencv
@@ -784,20 +790,19 @@ class GSRunner:
 
         return params, variables
 
-    def add_new_frames(self, rgbs, depths, masks, poses):
+    def add_new_frames(self, rgbs, depths, masks, poses, update_full=False):
         # TODO need to redesign the add function
         # new_pcd=pcd_normalized,)
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
 
-        #ForkedPdb().set_trace()
         # get latest poss
         poses[:, :3, 1:3] = -poses[:, :3, 1:3]
 
         # from opengl to opencv
         poses = self._preprocess_poses(poses)[-1, ...].unsqueeze(0)
 
-        # prepare data from training
+        # update the latedst data from training
         for color, depth, mask, pose in zip(colors, depths, masks, poses):
             w2c = torch.linalg.inv(pose)
             color = color.permute(2, 0, 1)  # /255.
@@ -823,6 +828,12 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
+        if update_full:
+            for idx, curr_data in enumerate(self.queued_data_for_train):
+                w2c = torch.linalg.inv(pose[idx])
+                curr_data["w2c"] = w2c
+                
+
     def initialize_optimizer(self, lr_dict, epoch):
         lrs = lr_dict.copy()
         if epoch > 0:
@@ -831,6 +842,8 @@ class GSRunner:
             lrs['unnorm_rotations'] = 0.0
             lrs['logit_opacities'] = 0.0
             lrs['log_scales'] = 0.0
+	    lrs["cam_unnorm_rots"] = lrs["cam_unnorm_rots"] / 10.
+            lrs["cam_trans"] = lrs['cam_trans'] / 10.
 
         param_groups = [
             {"params": [v], "name": k, "lr": lrs[k]} for k, v in self.params.items()
@@ -921,7 +934,8 @@ class GSRunner:
                 # shuffle the data
                 batch_data = [self.queued_data_for_train[i] for i in indices]
             else:
-                indices = list(range(batch_size))
+                indices = [0, -1]
+                indices = list(range(1, batch_size-1)) + indices
                 random.shuffle(indices)
                 # random sample batch_size data
                 batch_data = [self.queued_data_for_train[i] for i in indices]
