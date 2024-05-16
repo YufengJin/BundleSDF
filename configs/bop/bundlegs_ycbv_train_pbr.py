@@ -1,7 +1,8 @@
 import os
 from os.path import join as p_join
 
-scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", "000055", "000056", "000057", "000058", "000059"]
+# scenes  from 000000 to 000049
+scenes = ["000000", "000001", "000002", "000003", "000004", "000005", "000006", "000007", "000008", "000009", "000010", "000011", "000012", "000013", "000014", "000015", "000016", "000017", "000018", "000019", "000020", "000021", "000022", "000023", "000024", "000025", "000026", "000027", "000028", "000029", "000030", "000031", "000032", "000033", "000034", "000035", "000036", "000037", "000038", "000039", "000040", "000041", "000042", "000043", "000044", "000045", "000046", "000047", "000048", "000049"]
 
 primary_device="cuda:0"
 seed = 0
@@ -10,7 +11,7 @@ debug_level= 3
 
 scene_name = scenes[2]
 
-target_object_id = 5    
+target_object_id = 1    
 map_every = 1 
 keyframe_every = 5
 mapping_window_size = 24
@@ -119,7 +120,7 @@ config = dict(
         eval_save_qual=True,
     ),
     data=dict(
-        basedir="/home/datasets/BOP/ycbv/test", 
+        basedir="/home/datasets/BOP/ycbv/train_pbr", 
         data_cfg="./configs/data/bop.yaml",  #None
         sequence=scene_name,
         target_object_id = target_object_id,

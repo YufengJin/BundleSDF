@@ -66,6 +66,23 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
+def fuse_points_from_rgbd(colors, depths, masks, c2ws, Ks):
+    # create init point cloud
+    pcd = o3d.geometry.PointCloud()
+    for (color, depth, mask, pose, K) in zip(colors, depths, masks, c2ws, Ks):
+        mask = mask & (depth > 0.1) & (~np.isnan(depth))
+        sub_pcd = rgbd_to_pointcloud(color, depth, K, mask, return_o3d=True)
+
+        sub_pcd.transform(pose)
+        pcd += sub_pcd
+
+    # remove outliers
+    pcd = pcd.voxel_down_sample(voxel_size=0.001)
+    cl, ind = pcd.remove_statistical_outlier(nb_neighbors=100,
+                                            std_ratio=1.0)
+    pcd = pcd.select_by_index(ind)
+    return pcd
+
 def run_once(config: dict):
     cfg_bundletrack_cfg = os.path.join(_BASE_DIR, config["bundletrack_cfg"])
     cfg_bundletrack = yaml.load(open(cfg_bundletrack_cfg, 'r'), Loader=yaml.Loader)
@@ -142,7 +159,7 @@ def run_once(config: dict):
     else:
         checkpoint_time_idx = 0
 
-    first_num_frames = 10
+    first_num_frames = 20
 
     curr_data = defaultdict(list) 
     # Load data
@@ -163,9 +180,16 @@ def run_once(config: dict):
         if time_idx > 0:
             # add noise on gt_pose
             est_pose[:3, 3] += (np.random.rand(3) - 0.5) * 2 * 0.02   # translation noise (-0.02, 0.02)
-            est_pose[:3, :3] = gt_pose[:3, :3] @ cv2.Rodrigues((np.random.rand(3) - 0.5) * 2 * 5 / np.pi)[0]   # rotation noise (-5, 5) degree
+            est_pose[:3, :3] = gt_pose[:3, :3] @ cv2.Rodrigues((np.random.rand(3) - 0.5) * 2 * 5 / 180 * np.pi)[0]   # rotation noise (-5, 5) degree
         # convert BGR to RGB
         color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+
+        print(gt_pose)
+        plt.subplot(2, 2, 1); plt.imshow(color); plt.title('color')
+        plt.subplot(2, 2, 2); plt.imshow(depth); plt.title('depth')
+        plt.subplot(2, 2, 3); plt.imshow(mask); plt.title('mask')
+        plt.show()
+        1/0
 
         if time_idx == 0:
             if mask is None:
@@ -195,53 +219,53 @@ def run_once(config: dict):
             continue
 
         elif time_idx == first_num_frames:
-            colors = curr_data['colors']
-            depths = curr_data['depths']
-            masks = curr_data['masks']
-            Ks = curr_data['Ks']
-            gt_poses = curr_data['gt_poses']
-            est_poses = curr_data['est_poses']
+            colors = curr_data['colors'].copy()
+            depths = curr_data['depths'].copy()
+            masks = curr_data['masks'].copy()
+            Ks = curr_data['Ks'].copy()
+            gt_poses = curr_data['gt_poses'].copy()
+            est_poses = curr_data['est_poses'].copy()
 
-            
-            c2ws = [np.linalg.inv(pose) for pose in est_poses]
-            c2ws = np.as
+            # clear colors depth and mask Ks in curr_data
+            for k in ['colors', 'depths', 'masks', 'Ks']:
+                curr_data[k] = []
+
+            # update curr_data
+            curr_data['colors'].append(color)
+            curr_data['depths'].append(depth)
+            curr_data['masks'].append(mask)
+            curr_data['Ks'].append(K)
+            curr_data['gt_poses'].append(gt_pose)
+            curr_data['est_poses'].append(est_pose)
+
+            # convert list to numpy array
+            colors = np.asarray(colors)
+            depths = np.asarray(depths)
+            masks = np.asarray(masks)
+            Ks = np.asarray(Ks)
+            gt_poses = np.asarray(gt_poses)
+            est_poses = np.asarray(est_poses)    
+        
+            # estimate cameran poses
+            c2ws = np.linalg.inv(est_poses)
+            glc2ws = c2ws.copy()
+            glc2ws[:, :3, 1:3] *= -1 
+
+            # ground truth poses
+            gt_c2ws = np.linalg.inv(gt_poses)
+            gt_glc2ws = gt_c2ws.copy()
+            gt_glc2ws[:, :3, 1:3] *= -1
 
             colors, depths, masks, poses = preprocess_data(colors, depths, masks, glc2ws)
-            # create init point cloud
-            pcd = o3d.geometry.PointCloud()
-            pcd_gt = o3d.geometry.PointCloud()
-            for (color, depth, mask, pose, gt_pose, K) in zip(colors, depths, masks, est_poses, gt_poses, Ks):
-                mask = mask & (depth > 0.1) & (~np.isnan(depth))
-                sub_pcd = rgbd_to_pointcloud(color, depth, K, mask, return_o3d=True)
 
-                c2w = np.linalg.inv(pose)
-                c2w_gt = np.linalg.inv(gt_pose)
+            pcd = fuse_points_from_rgbd(colors, depths, masks, c2ws, Ks)
+            pcd.transform(est_poses[0])
 
-                if False:
-                    c2w[:3, 1:3] = -c2w[:3, 1:3]   # opengl
-                    c2w_gt[:3, 1:3] = -c2w_gt[:3, 1:3]
+            world_coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
 
-                sub_pcd = copy.deepcopy(sub_pcd).transform(c2w)
-                pcd += sub_pcd
-
-                sub_pcd_gt = copy.deepcopy(sub_pcd).transform(c2w_gt)
-                pcd_gt += sub_pcd_gt
-
-            # remove outliers
-            assert (est_poses[0] - gt_poses[0]).mean() < 1e-6
-
-            pcd = pcd.voxel_down_sample(voxel_size=0.001)
-            cl, ind = pcd.remove_statistical_outlier(nb_neighbors=100,
-                                                    std_ratio=1.0)
-            pcd = pcd.select_by_index(ind)
-            pcd = pcd.transform(np.linalg.inv(est_poses[0]))
-
-
-            pcd_gt = pcd_gt.voxel_down_sample(voxel_size=0.001)
-            cl, ind = pcd_gt.remove_statistical_outlier(nb_neighbors=100,
-                                                    std_ratio=1.0)
-            pcd_gt = pcd_gt.transform(np.linalg.inv(gt_poses[0]))
-            o3d.visualization.draw_geometries([pcd, pcd_gt])
+            pcd_gt = fuse_points_from_rgbd(colors, depths, masks, gt_c2ws, Ks)
+            
+            pcd_gt.transform(gt_poses[0])
 
             # pcd to numpy
             pcl = np.asarray(pcd.points)
@@ -256,25 +280,62 @@ def run_once(config: dict):
                 depths=depths,
                 masks=masks,
                 K=Ks[0],
-                poses=first_poses,
-                total_num_frames=total_num_frames,
+                poses=gt_glc2ws,
+                total_num_frames=num_frames,
                 pointcloud=pcl_gt,
                 #pointcloud_gt=pcl_gt,
-                poses_gt=glcam_in_obs_gt.copy(),
+                poses_gt=gt_glc2ws.copy(),
                 wandb_run=wandb_run,
                 #run_gui=True,
             )
 
+            gsRunner.train()
+
+            1/0
+        else:
+            colors = curr_data['colors'].copy()
+            depths = curr_data['depths'].copy()
+            masks = curr_data['masks'].copy()
+            Ks = curr_data['Ks'].copy()
+            gt_poses = curr_data['gt_poses'].copy()
+            est_poses = curr_data['est_poses'].copy()
+
+            # convert list to numpy array
+            colors = np.asarray(colors)
+            depths = np.asarray(depths)
+            masks = np.asarray(masks)
+            Ks = np.asarray(Ks)
+            gt_poses = np.asarray(gt_poses)
+            est_poses = np.asarray(est_poses)   
+
+            # clear colors depth and mask Ks in curr_data
+            for k in ['colors', 'depths', 'masks', 'Ks']:
+                curr_data[k] = []
+
+            # update curr_data
+            curr_data['colors'].append(color)
+            curr_data['depths'].append(depth)
+            curr_data['masks'].append(mask)
+            curr_data['Ks'].append(K)
+            curr_data['gt_poses'].append(gt_pose)
+            curr_data['est_poses'].append(est_pose)
+
+            # estimate cameran poses
+            c2ws = np.linalg.inv(est_poses)
+            glc2ws = c2ws.copy()
+            glc2ws[:, :3, 1:3] *= -1 
+
+            # ground truth poses
+            gt_c2ws = np.linalg.inv(gt_poses)
+            gt_glc2ws = gt_c2ws.copy()
+            gt_glc2ws[:, :3, 1:3] *= -1
+
+            colors, depths, masks, poses = preprocess_data(colors, depths, masks, glc2ws)
+            
+            gsRunner.add_new_frames(colors, depth, mask, poses)
 
 
 
-        
-
-
-        
-    
-    # Object tracking and Gaussian splats generation occur simultaneously
-    pass
 
 def run_global_gs():
     # Once object tracking concludes, keyframes are selected for refining Gaussian Splats

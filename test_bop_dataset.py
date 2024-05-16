@@ -54,6 +54,7 @@ def fuse_pointcloud(rgbs, depths, masks, glcam_in_obs, K):
     for (color, depth, mask, c2w) in zip(rgbs, depths, masks, glcam_in_obs):
 
         mask = mask & (depth > 0.1) & (~np.isnan(depth))
+
         pcd = rgbd_to_pointcloud(color, depth, K, mask, return_o3d=True)
 
         obj_in_cam = c2w.copy()
@@ -280,7 +281,7 @@ first_poses = poses[:first_init_num_frames, ...]
 # get center of poses
 
 # fuse pointcloud from rgbd
-pcd = fuse_pointcloud(first_rgbs, first_depths, first_masks, first_poses)
+pcd = fuse_pointcloud(first_rgbs, first_depths, first_masks, first_poses, K)
 world_coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
 
 # create initial pointcloud from RGBD
@@ -359,7 +360,6 @@ opt_pcd.points = o3d.utility.Vector3dVector(pcl[:, :3])
 opt_pcd.colors = o3d.utility.Vector3dVector(pcl[:, 3:6])
 
 o3d.visualization.draw([opt_pcd, pcd_gt, world_coord])
-1/0
 
 for i in range(first_init_num_frames, total_num_frames):
     rgb = rgbs[i]

@@ -87,6 +87,9 @@ def rgbd_to_pointcloud(rgb_image, depth_image, K, mask=None, return_o3d=False):
     cx = K[0][2]
     cy = K[1][2]
 
+    if len(depth_image.shape) == 3:
+        depth_image = depth_image[..., 0]
+
     h, w = depth_image.shape
     y, x = np.indices((h, w))
     z = depth_image
@@ -100,7 +103,7 @@ def rgbd_to_pointcloud(rgb_image, depth_image, K, mask=None, return_o3d=False):
     colors = rgb_image.reshape(-1, 3) #.astype(np.float32)          
 
     if mask is not None:
-        mask = mask.reshape(-1)
+        mask = mask.reshape(-1).astype(bool)
         points = points[mask]
         colors = colors[mask]
 

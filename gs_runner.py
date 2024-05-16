@@ -538,16 +538,18 @@ class GSRunner:
         #TODO  remove pose preprocess outside
         poses[:, :3, 1:3] = -poses[:, :3, 1:3]
         self._fisrt_c2w = poses[0].copy()
-        poses = self._preprocess_poses(poses)
+        rel_poses = self._preprocess_poses(poses)
 
         # convert camera pose from opengl to opencv
         poses_gt[:, :3, 1:3] = -poses_gt[:, :3, 1:3]
+        self._rel_gt_poses = self._preprocess_poses(poses_gt)
+
         self._poses_gt = poses_gt
 
         intrinsics = torch.eye(4).to(self.device)
         intrinsics[:3, :3] = torch.tensor(K)
 
-        first_data = (colors[0], depths[0], masks[0], intrinsics, poses[0])
+        first_data = (colors[0], depths[0], masks[0], intrinsics, rel_poses[0])
         
         # intialize pointcloud if provided
         if pointcloud is not None:
@@ -585,7 +587,7 @@ class GSRunner:
         # self.queued_data_for_train = deque()
 
         # prepare data from training
-        for color, depth, mask, pose in zip(colors, depths, masks, poses):
+        for color, depth, mask, pose in zip(colors, depths, masks, rel_poses):
             w2c = torch.linalg.inv(pose)
             # TODO check B,C,W,H
             color = color.permute(2, 0, 1)  # /255.
@@ -1086,7 +1088,7 @@ class GSRunner:
                 optimizer.zero_grad(set_to_none=True)
 
                 # visualize all info of gaussians
-                if self.debug_level > 2 and self.gaussians_iter % 20 == 0:
+                if self.debug_level > 3 and self.gaussians_iter % 20 == 0:
                     grads = self.variables['means2D_gradient_accum'] / self.variables['denom']
                     grads[grads.isnan()] = 0.0
 
@@ -1215,13 +1217,17 @@ class GSRunner:
 
 
     def train_once(self, batch_data, iter, dssim_weight=0.2, tracking=False, opt_both=True):
-        # TODO save each loss for frame
-        losses = {k: torch.tensor(0.0).to(self.device) for k in ["edge", "depth", "silhouette", "im"]}
+        weighted_losses = {k: torch.tensor(0.0).to(self.device) for k in ["edge", "depth", "silhouette", "im"]}
 
         # loss weights
-        loss_weights = self.cfg_gs["train"]["loss_weights"]
+        if not tracking:
+            loss_weights = self.cfg_gs["train"]["loss_weights"]['mapping']
+        else:
+            loss_weights = self.cfg_gs["train"]["loss_weights"]['tracking']
 
+        # TODO add best candidate camera pose 
         for curr_data in batch_data:
+            curr_losses = dict()
             iter_time_idx = curr_data["id"]
             
             # transform the gaussians to the current frame
@@ -1241,6 +1247,7 @@ class GSRunner:
                 transformed_gaussians = transform_to_frame(
                     self.params, iter_time_idx, gaussians_grad=False, camera_grad=True
                 )
+
 
             # Initialize Render Variables
             rendervar = transformed_params2rendervar(self.params, transformed_gaussians)
@@ -1280,10 +1287,7 @@ class GSRunner:
             mask_gt = curr_data["mask"].bool()
             gt_im = curr_data["im"] 
 
-            if not tracking:
-                mask = mask_gt & presence_sil_mask & nan_mask
-            else:
-                mask = mask_gt & nan_mask
+            mask = mask_gt & presence_sil_mask & nan_mask
 
             # canny edge detection
             gt_gray = ki.color.rgb_to_grayscale(curr_data["im"].unsqueeze(0))
@@ -1300,11 +1304,11 @@ class GSRunner:
                 
             # edge loss
             if not tracking:
-                edge_loss = torch.tensor(0.0).to(self.device)
+                edge_loss = torch.tensor(0.0).to(self.device) 
             else:
                 edge_loss = torch.abs(gt_edge - edge).sum()
 
-            losses["edge"] += edge_loss
+            curr_losses["edge"] = edge_loss
             
             # Depth loss
             if not tracking:
@@ -1312,14 +1316,15 @@ class GSRunner:
             else:
                 depth_loss = torch.abs(curr_data["depth"] - depth)[mask].sum()
 
-
-            # evaluate gaussian depth rendering
-            depth_dist = torch.abs(curr_data["depth"] - depth)[mask_gt & presence_sil_mask & nan_mask].mean()
-            losses["depth"] += depth_loss
+            curr_losses["depth"] = depth_loss
 
             # silhouette loss
             if not tracking:
-                losses["silhouette"] += torch.abs(silhouette.float() - curr_data["mask"]).mean()
+                silhouette_loss = torch.abs(silhouette.float() - curr_data["mask"]).mean()
+            else:
+                silhouette_loss = torch.tensor(0.0).to(self.device)
+
+            curr_losses["silhouette"] = silhouette_loss
 
             # color loss
             color_mask = torch.tile(mask, (3, 1, 1))
@@ -1327,23 +1332,24 @@ class GSRunner:
 
             rgbl1 = torch.abs(gt_im - im)[color_mask].mean()
             im_loss = (1-dssim_weight) * rgbl1 + dssim_weight * (1.0 - calc_ssim(im, gt_im))
-            losses["im"] += im_loss
+            curr_losses["im"] = im_loss
 
-            # TODO track pose loss
-            if curr_data.get("track_losses") is None:
-                curr_data['track_losses'] = [(loss_weights['im'] * im_loss + loss_weights['depth'] * depth_loss + loss_weights['edge'] * edge_loss).item()]
-            else:
-                curr_data['track_losses'].append((loss_weights['im'] * im_loss + loss_weights['depth'] * depth_loss + loss_weights['edge'] * edge_loss).item())
+            # weighted losses
+            curr_losses = {k: loss_weights[k] * v for k, v in curr_losses.items()}
 
             if self.use_wandb:
                 frame_id = curr_data["id"]
-                curr_losses = {f'im_{frame_id}': losses['im'], f'depth_{frame_id}': losses['depth'], f'edge_{frame_id}': losses['edge'], f'silhouette_{frame_id}': losses['silhouette']}
-                curr_losses[f'total_{frame_id}'] = curr_data['track_losses'][-1]
-                wandb.log(curr_losses)
+                frame_losses = dict()
+                for k, w in curr_losses.items():
+                    frame_losses[f"{k}_{frame_id}"] = curr_losses[k]
+                wandb.log(frame_losses)
 
             # visualize debugging images
-            if self.debug_level > 1 and (iter % 50 == 0):
-                # define a function which returns an image as numpy array from figure
+            if self.debug_level > 3 and (iter % 50 == 0):
+                # evaluate gaussian depth rendering
+                magnified_diff_depth = torch.abs(curr_data["depth"] - depth) * (mask_gt & presence_sil_mask & nan_mask)
+                depth_dist = magnified_diff_depth.mean()
+
                 fig, ax = plt.subplots(4, 4, figsize=(12, 12))
                 weighted_render_im = im * color_mask
                 weighted_im = curr_data["im"] * color_mask
@@ -1362,6 +1368,7 @@ class GSRunner:
                     .detach()
                     .cpu()
                 )
+
                 diff_candy = (
                     torch.abs(weighted_render_candy - weighted_candy)
                     .mean(dim=0)
@@ -1389,10 +1396,10 @@ class GSRunner:
                 cbar = fig.colorbar(ax_im, ax=ax[1, 1])
                 ax[1, 1].set_title("Weighted Rendered Depth")
                 ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
-                ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
+                ax[0, 2].set_title(f"Diff RGB, Loss: {curr_losses['im'].item()}")
                 ax_im = ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
                 cbar = fig.colorbar(ax_im, ax=ax[1, 2])
-                ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}, \nMean Depth Dist: {depth_dist:.6f}")
+                ax[1, 2].set_title(f"Diff Depth, Loss: {curr_losses['depth'].item()}, \nMean Depth Dist: {depth_dist:.6f}")
                 ax_im = ax[0, 3].imshow(silhouette.detach().squeeze().cpu())
                 cbar = fig.colorbar(ax_im, ax=ax[0, 3])
                 ax[0, 3].set_title("Silhouette Mask")
@@ -1400,6 +1407,9 @@ class GSRunner:
                 ax[1, 3].set_title("Loss Mask")
                 ax[2, 0].imshow(curr_data["mask"].detach().squeeze().cpu())
                 ax[2, 0].set_title("gt Mask")
+                ax_im = ax[2, 1].imshow(magnified_diff_depth.detach().squeeze().cpu(), cmap="jet", vmin=0, vmax=0.02)
+                cbar = fig.colorbar(ax_im, ax=ax[2, 1])
+                ax[2, 1].set_title("Masked Diff Depth")
                 ax[2, 2].imshow(
                     (im.permute(1, 2, 0).detach().squeeze().cpu().numpy() * 255).astype(
                         np.uint8
@@ -1428,9 +1438,9 @@ class GSRunner:
                 ax[3, 2].imshow(
                     torch.clamp(diff_candy.detach().squeeze().cpu(), 0.0, 1.0), cmap="jet"
                 )
-                ax[3, 2].set_title(f"Diff Edge: {torch.round(losses['edge'])}")
+                ax[3, 2].set_title(f"Diff Edge: {curr_losses['edge'].item()}")
                 ax[3, 3].imshow(diff_sil, cmap="jet")
-                ax[3, 3].set_title(f"Silhouette Loss: {float(losses['silhouette'])}")
+                ax[3, 3].set_title(f"Silhouette Loss: {curr_losses['silhouette'].item()}")
                 # Turn off axis
                 for i in range(2):
                     for j in range(4):
@@ -1446,11 +1456,62 @@ class GSRunner:
 
                 current_time = datetime.datetime.now()
                 filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-                plt.show()
-                #plt.savefig(
-                #    os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
-                #)
+                plt.savefig(
+                    os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
+                )
                 plt.close()
+
+            if self.debug_level > 2 and iter % 50 == 0:
+                # visualize the transformed gaussians 
+                    # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
+                rel_w2c_gt =  self._rel_gt_poses[iter_time_idx]
+                rel_w2c_gt = torch.linalg.inv(rel_w2c_gt).cuda().float()
+                rel_w2c_rot = rel_w2c_gt[:3, :3].unsqueeze(0).detach()
+                cam_rot_gt = matrix_to_quaternion(rel_w2c_rot)
+
+                with torch.no_grad():
+                    if self.params['log_scales'].shape[1] == 1:
+                        transform_rots = False # Isotropic Gaussians
+                    else:
+                        transform_rots = True # Anisotropic Gaussians
+
+                    pts = self.params['means3D']
+                    unnorm_rots = self.params['unnorm_rotations']
+                
+                    transformed_gt_gaussians = {}
+                    # Transform Centers of Gaussians to Camera Frame
+                    pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+                    pts4 = torch.cat((pts, pts_ones), dim=1)
+                    transformed_pts = (rel_w2c_gt @ pts4.T).T[:, :3]
+                    transformed_gt_gaussians['means3D'] = transformed_pts
+                    # Transform Rots of Gaussians to Camera Frame
+                    if transform_rots:
+                        norm_rots = F.normalize(unnorm_rots)
+                        transformed_rots = quat_mult(cam_rot_gt, norm_rots)
+                        transformed_gt_gaussians['unnorm_rotations'] = transformed_rots
+                    else:
+                        transformed_gt_gaussians['unnorm_rotations'] = unnorm_rots
+
+                transformed_pcl = transformed_gaussians['means3D'].detach().cpu().numpy()
+
+                transformed_gt_pcl = transformed_gt_gaussians['means3D'].detach().cpu().numpy()
+
+                # gt gaussians: green color, transformed gaussians: red color
+                transformed_pcd = o3d.geometry.PointCloud()
+                transformed_pcd.points = o3d.utility.Vector3dVector(transformed_pcl)
+                transformed_pcd.colors = o3d.utility.Vector3dVector(np.array([1, 0, 0]) * np.ones_like(transformed_pcl))
+
+                transformed_gt_pcd = o3d.geometry.PointCloud()
+                transformed_gt_pcd.points = o3d.utility.Vector3dVector(transformed_gt_pcl)
+                transformed_gt_pcd.colors = o3d.utility.Vector3dVector(np.array([0, 1, 0]) * np.ones_like(transformed_gt_pcl))
+
+                world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+                msg = f"DEBUG: Iteration: {self.gaussians_iter}, Frame: {iter_time_idx}\n"
+                for k, v in curr_losses.items():
+                    msg += f"\t{k} Loss: {v.item()}\n"
+                print(msg)
+                o3d.visualization.draw_geometries([transformed_pcd, transformed_gt_pcd, world_frame])
+
                 
             # TODO not update every time, because optimizer is updated once per batch, ?????????
             seen = radius > 0
@@ -1459,8 +1520,10 @@ class GSRunner:
             )
             self.variables["seen"] = seen
 
-        weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
-
+            # sum individual losses
+            for k, v in curr_losses.items():
+                weighted_losses[k] += v
+            
         loss = sum(weighted_losses.values())
 
         # regularization of first frame 0
