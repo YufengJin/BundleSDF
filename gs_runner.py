@@ -165,6 +165,21 @@ def visualize_gaussians(points, scale):
     pcl.colors = o3d.utility.Vector3dVector(colors[..., :3])
     return pcl
 
+def visualize_ellipsoids_gaussians(points, colors, scales, rotations, alpha):
+    # TODO
+    assert points.shape[1] == 3 and points.shape[0] == colors.shape[0] == scales.shape[0] == rotations.shape[0]
+    if alpha is not None:
+        assert points.shape[0] == alpha.shape[0]
+
+    # all inputs must be ndnumpy array
+
+    ellipsis = []
+    for xyz, rotation, scale, color in zip(points, rotations, scales, colors):
+        ellipsoid = o3d.geometry.TriangleMesh.create_sphere(radius=1.0)
+        if scale.shape[0] == 1:
+            scale = np.tile(scale, 3)
+        ellipsoid.scale(scale)
+
 def visualize_param_info(params):
     pcl = o3d.geometry.PointCloud()
     points = params["means3D"].detach().cpu().numpy()
@@ -941,37 +956,38 @@ class GSRunner:
                     rel_w2c_tran = rel_w2c[:3, 3].detach()
                     # Update the camera parameters
                     self.params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
+                    self.params["cam_trans"][..., time_idx] = rel_w2c_tran
 
         # intialize optimizer
         for epoch in range(self.cfg_gs['train']["num_epochs"]):
             # TODO select keyframes + latest frames + first frame
-            if len(self.queued_data_for_train) < batch_size:
-                indices = list(range(len(self.queued_data_for_train)))
-                random.shuffle(indices)
+            # if len(self.queued_data_for_train) < batch_size:
+            #     indices = list(range(len(self.queued_data_for_train)))
+            #     random.shuffle(indices)
 
-                # shuffle the data
-                batch_data = [self.queued_data_for_train[i] for i in indices]
-            else:
-                indices = [0, -1]
-                indices = list(range(1, batch_size-1)) + indices
-                random.shuffle(indices)
-                # random sample batch_size data
-                batch_data = [self.queued_data_for_train[i] for i in indices]
-            
+            #     # shuffle the data
+            #     batch_data = [self.queued_data_for_train[i] for i in indices]
+            # else:
+            #     indices = [0, -1]
+            #     indices = list(range(1, batch_size-1)) + indices
+            #     random.shuffle(indices)
+            #     # random sample batch_size data
+            #     batch_data = [self.queued_data_for_train[i] for i in indices]
+
+        
+            indices = list(range(len(self.queued_data_for_train)))
+            random.shuffle(indices)
+
+            indices = indices[:batch_size]
+            # shuffle the data
+            batch_data = [self.queued_data_for_train[i] for i in indices]
+
             # update camera rotation and translation in params 
             with torch.no_grad():
                 for curr_data in batch_data:
                     time_idx = curr_data["id"]
                     rel_w2c = curr_data["w2c"]
                     if time_idx > 0:
-                        # update initial pose relative to frame 0
-                        rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
-                        rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
-                        rel_w2c_tran = rel_w2c[:3, 3].detach()
-                        # Update the camera parameters
-                        self.params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
-                        self.params["cam_trans"][..., time_idx] = rel_w2c_tran
-
                         if self.cfg_gs['add_new_gaussians']:
                         #if not curr_data["seen"] and self.cfg_gs['add_new_gaussians']:
                             print(f"INFO: Adding new gaussians for frame {time_idx}")
@@ -1158,31 +1174,31 @@ class GSRunner:
                     curr_data["w2c"] = torch.linalg.inv(rel_w2c0) @ w2c
 
                 # # # update gaussian parameters
-                if self.params['log_scales'].shape[1] == 1:
-                    transform_rots = False # Isotropic Gaussians
-                else:
-                    transform_rots = True # Anisotropic Gaussians
+                # if self.params['log_scales'].shape[1] == 1:
+                #     transform_rots = False # Isotropic Gaussians
+                # else:
+                #     transform_rots = True # Anisotropic Gaussians
                
-                # Get Centers and Unnorm Rots of Gaussians in World Frame 
-                pts = self.params['means3D'].detach()
-                unnorm_rots = self.params['unnorm_rotations'].detach()
+                # # Get Centers and Unnorm Rots of Gaussians in World Frame 
+                # pts = self.params['means3D'].detach()
+                # unnorm_rots = self.params['unnorm_rotations'].detach()
 
-                transformed_gaussians = {}
-                # Transform Centers of Gaussians to Camera Frame
-                pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
-                pts4 = torch.cat((pts, pts_ones), dim=1)
-                transformed_pts = (rel_w2c0 @ pts4.T).T[:, :3]
-                self.params["means3D"] = transformed_pts
+                # transformed_gaussians = {}
+                # # Transform Centers of Gaussians to Camera Frame
+                # pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+                # pts4 = torch.cat((pts, pts_ones), dim=1)
+                # transformed_pts = (rel_w2c0 @ pts4.T).T[:, :3]
+                # self.params["means3D"] = transformed_pts
 
-                if transform_rots:
-                    norm_rots = F.normalize(unnorm_rots)
-                    transformed_rots = quat_mult(cam_rot0, norm_rots)
-                    self.params['unnorm_rotations'] = transformed_rots
-                else:
-                    self.params['unnorm_rotations'] = unnorm_rots
+                # if transform_rots:
+                #     norm_rots = F.normalize(unnorm_rots)
+                #     transformed_rots = quat_mult(cam_rot0, norm_rots)
+                #     self.params['unnorm_rotations'] = transformed_rots
+                # else:
+                #     self.params['unnorm_rotations'] = unnorm_rots
                 
-                self.params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in self.params.items()}
-                torch.cuda.empty_cache()
+                # self.params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in self.params.items()}
+                # torch.cuda.empty_cache()
 
             progress_bar.update(1)
 
@@ -1264,7 +1280,10 @@ class GSRunner:
             mask_gt = curr_data["mask"].bool()
             gt_im = curr_data["im"] 
 
-            mask = mask_gt & presence_sil_mask & nan_mask
+            if not tracking:
+                mask = mask_gt & presence_sil_mask & nan_mask
+            else:
+                mask = mask_gt & nan_mask
 
             # canny edge detection
             gt_gray = ki.color.rgb_to_grayscale(curr_data["im"].unsqueeze(0))
@@ -1293,6 +1312,9 @@ class GSRunner:
             else:
                 depth_loss = torch.abs(curr_data["depth"] - depth)[mask].sum()
 
+
+            # evaluate gaussian depth rendering
+            depth_dist = torch.abs(curr_data["depth"] - depth)[mask_gt & presence_sil_mask & nan_mask].mean()
             losses["depth"] += depth_loss
 
             # silhouette loss
@@ -1327,8 +1349,8 @@ class GSRunner:
                 weighted_im = curr_data["im"] * color_mask
                 weighted_render_depth = depth * mask
                 weighted_depth = curr_data["depth"] * mask
-                weighted_render_candy = (edge * mask) 
-                weighted_candy = (gt_edge * mask)
+                weighted_render_candy = (edge) 
+                weighted_candy = (gt_edge)
                 viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
 
                 diff_rgb = (
@@ -1370,7 +1392,7 @@ class GSRunner:
                 ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
                 ax_im = ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
                 cbar = fig.colorbar(ax_im, ax=ax[1, 2])
-                ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}")
+                ax[1, 2].set_title(f"Diff Depth, Loss: {torch.round(losses['depth'])}, \nMean Depth Dist: {depth_dist:.6f}")
                 ax_im = ax[0, 3].imshow(silhouette.detach().squeeze().cpu())
                 cbar = fig.colorbar(ax_im, ax=ax[0, 3])
                 ax[0, 3].set_title("Silhouette Mask")
@@ -1424,10 +1446,10 @@ class GSRunner:
 
                 current_time = datetime.datetime.now()
                 filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
-                #plt.show()
-                plt.savefig(
-                    os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
-                )
+                plt.show()
+                #plt.savefig(
+                #    os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
+                #)
                 plt.close()
                 
             # TODO not update every time, because optimizer is updated once per batch, ?????????

@@ -6,7 +6,7 @@ scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", 
 primary_device="cuda:0"
 seed = 0
 use_gui = False
-debug_level= 3 
+debug_level= 2 
 
 scene_name = scenes[2]
 
@@ -51,9 +51,9 @@ config = dict(
         depth_thres=0.01,
     ),
     train=dict(
-        num_epochs=10,
-        batch_size=1,
-        batch_iters=100,
+        num_epochs=1,
+        batch_size=20,
+        batch_iters=50,
         sil_thres=0.9,
         lrs=dict(
             #means3D=0.0001,
@@ -68,8 +68,8 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.00,
-            cam_unnorm_rots=0.005,
-            cam_trans=0.0005,
+            cam_unnorm_rots=0.00,
+            cam_trans=0.000,
         ),
         loss_weights=dict(
             im=1.,

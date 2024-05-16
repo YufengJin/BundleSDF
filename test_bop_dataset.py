@@ -11,53 +11,14 @@ import threading
 import time
 import hashlib
 from gs_runner import GSRunner
+from utils.graphics_utils import rgbd_to_pointcloud
 
 import torch   
 seed = 0
 np.random.seed(seed)
 torch.manual_seed(seed)
 
-def run_gui(gui_lock, gui_dict):
-
-    # initialize pointcloud
-    num_points = 1000
-    points = np.random.rand(num_points, 3)
-    colors = np.random.rand(num_points, 3)
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-
-    # configure the open3d visualizer size
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(width=800, height=600)
-
-    vis.add_geometry(pcd)
-
-    while 1:
-        with gui_lock:
-            join = gui_dict['join']
-
-            if 'pointcloud' in gui_dict:
-                new_pcd = gui_dict["pointcloud"]
-                del gui_dict["pointcloud"]
-            else:
-                new_pcd = None
-        if join:
-            break
-
-        if new_pcd is not None:
-            pcd.points = o3d.utility.Vector3dVector(new_pcd[:, :3])
-            pcd.colors = o3d.utility.Vector3dVector(new_pcd[:, 3:6])
-
-        time.sleep(0.05)
-        vis.update_geometry(pcd)
-        vis.poll_events()
-        vis.update_renderer()
-
-    vis.destroy_window()
-
-def center_scale_camer_poses(cam_poses):
+def center_scale_camera_poses(cam_poses):
     # TODO from pointcloud
     center = np.mean(cam_poses[:, :3, 3], axis = 0)
     scale = 1.5/0.3
@@ -88,92 +49,12 @@ def preprocess_data(
     poses[:, :3, 3] *= sc_factor
     return rgbs, depths, masks, poses
 
-def evaluate_batch_pose_error(poses_gt, poses_est):
-    num_poses = poses_est.shape[0]
-    
-    translation_errors = np.zeros(num_poses)
-    rotation_errors = np.zeros(num_poses)
-    
-    for i in range(num_poses):
-        pose_gt = poses_gt[i]
-        pose_est = poses_est[i]
-        
-        # Extract translation vectors
-        translation_gt = pose_gt[:3, 3]
-        translation_est = pose_est[:3, 3]
-        
-        # Extract rotation matrices
-        rotation_gt = pose_gt[:3, :3]
-        rotation_est = pose_est[:3, :3]
-        
-        # Calculate translation error
-        translation_error = np.linalg.norm(translation_gt - translation_est)
-        
-        # Calculate rotation error
-        rotation_error_cos = 0.5 * (np.trace(np.dot(rotation_gt.T, rotation_est)) - 1.0)
-        rotation_error_cos = min(1.0, max(-1.0, rotation_error_cos))  # Ensure value is in valid range for arccos
-        rotation_error_rad = np.arccos(rotation_error_cos)
-        rotation_error_deg = np.degrees(rotation_error_rad)
-        
-        translation_errors[i] = translation_error
-        rotation_errors[i] = rotation_error_deg
-    
-    return translation_errors, rotation_errors
-
-
-def fuse_pointcloud(rgbs, depths, masks, glcam_in_obs):
-    def rgbd_to_pointcloud(rgb_image, depth_image, K):
-        fx = K[0][0]
-        fy = K[1][1]
-        cx = K[0][2]
-        cy = K[1][2]
-    
-        h, w = depth_image.shape
-        y, x = np.indices((h, w))
-        z = depth_image
-        x = (x - cx) * z / fx
-        y = (y - cy) * z / fy
-    
-        # Stack the coordinates to create the point cloud
-        points = np.stack((x, y, z), axis=-1).reshape(-1, 3)
-    
-        # Step 4: Associate colors with the point cloud
-        colors = rgb_image.reshape(-1, 3) #.astype(np.float32)          
-        # Step 5: Create Open3D point cloud and visualize
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        pcd.colors = o3d.utility.Vector3dVector(colors) #/ 255.0)  # Normalize colors to range [0, 1]
-    
-        return pcd
-    
-    def display_inlier_outlier(cloud, ind):
-        inlier_cloud = cloud.select_by_index(ind)
-        outlier_cloud = cloud.select_by_index(ind, invert=True)
-    
-        print("Showing outliers (red) and inliers (gray): ")
-        outlier_cloud.paint_uniform_color([1, 0, 0])
-        inlier_cloud.paint_uniform_color([0.8, 0.8, 0.8])
-        o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud])
-
-
+def fuse_pointcloud(rgbs, depths, masks, glcam_in_obs, K):
     pcdAll = o3d.geometry.PointCloud()
     for (color, depth, mask, c2w) in zip(rgbs, depths, masks, glcam_in_obs):
-        # mask erosion
-        mask_uint = mask.astype(np.uint8)
-        kernel = np.ones((30,30), np.uint8)  # You can adjust the kernel size as needed
 
-        # Perform erosion
-        eroded_mask = cv2.erode(mask_uint, kernel, iterations=1)
-
-        mask = eroded_mask.astype(np.bool_)
-
-        depth = depth.copy().squeeze()
-
-        valid_depth = depth > 0.1 
-
-        mask = valid_depth & mask            
-
-        pcd = rgbd_to_pointcloud(color, depth, K)
+        mask = mask & (depth > 0.1) & (~np.isnan(depth))
+        pcd = rgbd_to_pointcloud(color, depth, K, mask, return_o3d=True)
 
         obj_in_cam = c2w.copy()
         obj_in_cam[:3, 1:3] *= -1
@@ -230,7 +111,7 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 # load from bop dataset
 dataRootDir = '/home/yjin/repos/gaussian-splatting/bop_output/bop_data/ycbv/train_pbr/000000'
 #dataRootDir = '/home/datasets/BOP/ycbv/test/000048'
-target_object_id = 5 
+target_object_id = 11 
 
 cameraInfo = json.load(open(dataRootDir + '/scene_camera.json', 'r'))
 
@@ -430,7 +311,7 @@ pcl_random = np.concatenate([points, colors], axis=1)
 
 
 # compare gt pointcloud
-pcd_gt = fuse_pointcloud(rgbs[::5,...], depths[::5, ...], masks[::5, ...], glcam_in_obs_gt[::5, ...])
+pcd_gt = fuse_pointcloud(rgbs[::5,...], depths[::5, ...], masks[::5, ...], glcam_in_obs_gt[::5, ...], K)
 pcd_gt.transform(obj_init_pose)
 
 pcd_gt = pcd_gt.voxel_down_sample(voxel_size=0.001)
@@ -441,11 +322,6 @@ pcl_gt = np.concatenate([pcl_gt, np.asarray(pcd_gt.colors)], axis=1)
 # visualize pointcloud
 #o3d.visualization.draw([pcd, pcd_gt, world_coord])
 
-gui_lock = threading.Lock()
-gui_dict = {"join": False}
-
-gui_runner = threading.Thread(target=run_gui, args=(gui_lock, gui_dict))
-#gui_runner.start()
 
 import wandb
 wandb_run = wandb.init(
@@ -453,10 +329,10 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    #mode='disabled'
+    mode='disabled'
 )
 
-#first_poses = glcam_in_obs_gt[:first_init_num_frames, ...]
+first_poses = glcam_in_obs_gt[:first_init_num_frames, ...]
 
 gsRunner = GSRunner(
     cfg,
@@ -470,7 +346,7 @@ gsRunner = GSRunner(
     #pointcloud_gt=pcl_gt,
     poses_gt=glcam_in_obs_gt.copy(),
     wandb_run=wandb_run,
-    run_gui=True,
+    #run_gui=True,
 )
 
 # save trained gaussian model
@@ -504,7 +380,4 @@ opt_pcd.colors = o3d.utility.Vector3dVector(pcl[:, 3:6])
 
 
 o3d.visualization.draw([opt_pcd, pcd_gt, world_coord])
-1/0
-with gui_lock:
-    gui_dict['join'] = True
 
