@@ -7,7 +7,7 @@ scenes = ["000000", "000001", "000002", "000003", "000004", "000005", "000006", 
 primary_device="cuda:0"
 seed = 0
 use_gui = False
-debug_level= 3 
+debug_level= 3 # 0: No Debug, 1: Only Text Info, 2: Save Debug Images, 3: visualize gaussian, 4: Save gaussians ply
 
 scene_name = scenes[0]
 
@@ -36,7 +36,7 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 
 """
 
-target_object_id = 4    
+target_object_id = 5    
 map_every = 1 
 keyframe_every = 5
 mapping_window_size = 24
@@ -69,8 +69,8 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    save_params=True, # Save Parameters
-    save_params_interval=500, # Save Parameters Interval
+    save_ply=True, # Save Parameters
+    save_ply_interval=500, # Save Parameters Interval
     use_wandb=False,
     add_new_gaussians=False, # add new gaussians during training         
     add_gaussian_dict=dict( # Needs to be updated based on the number of mapping iterations
@@ -78,10 +78,16 @@ config = dict(
         sil_thres=0.8,
         depth_thres=0.01,
     ),
+    debug=dict(
+        save_images=False,
+        save_images_every=100,
+        save_gaussians_info=False,
+        save_gaussians_info_every=10,
+    ),
     train=dict(
         num_epochs=1,
         batch_size=10,
-        batch_iters=5000,
+        batch_iters=1000,
         sil_thres=0.9,
         lrs=dict(
             means3D=0.0001,
@@ -90,19 +96,19 @@ config = dict(
             logit_opacities=0.05,
             log_scales=0.001,
             cam_unnorm_rots=0.001,
-            cam_trans=0.0001,
+            cam_trans=0.0001
         ),
         loss_weights=dict(
             mapping=dict(
-                im=1.,
-                depth=0.,
-                edge=1.,
-                silhouette=1.
+                im=0.,
+                depth=1.,
+                edge=0.,
+                silhouette=0.
             ),
             tracking=dict(
                 im=1., 
                 depth=1.,
-                edge=1.,
+                edge=0.,
                 silhouette=0.
             ),
         ),

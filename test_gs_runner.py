@@ -32,7 +32,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    #mode='disabled'
+    mode='disabled'
 )
 
 def preprocess_data(
@@ -159,7 +159,7 @@ def run_once(config: dict):
     else:
         checkpoint_time_idx = 0
 
-    first_num_frames = 20
+    first_num_frames = 10 
 
     curr_data = defaultdict(list) 
     # Load data
@@ -271,19 +271,33 @@ def run_once(config: dict):
             pcl_gt = np.asarray(pcd_gt.points)
             pcl_gt = np.concatenate([pcl_gt, np.asarray(pcd_gt.colors)], axis=1)
 
+            # create initial pointcloud in unit scale
+            bbox = pcd.get_oriented_bounding_box()
+            center = bbox.center
+            extent = bbox.extent.max() * 1.5 # leave some margin
+
+            N_points = 10000
+            pts = np.random.rand(N_points, 3) * extent - extent / 2
+            pts += center
+
+            cols = np.random.rand(N_points, 3)
+
+            pcl_random = np.concatenate([pts, cols], axis=1)
+
+
             gsRunner = GSRunner(
                 config,
                 rgbs=colors,
                 depths=depths,
                 masks=masks,
                 K=Ks[0],
-                poses=gt_glc2ws,
+                poses=glc2ws,
                 total_num_frames=num_frames,
-                pointcloud=pcl,
-                #pointcloud_gt=pcl_gt,
+                pointcloud=pcl_gt.copy(),
+                pointcloud_gt=pcl_gt.copy(),
                 poses_gt=gt_glc2ws.copy(),
                 wandb_run=wandb_run,
-                run_gui=True,
+                #run_gui=True,
             )
 
             gsRunner.train()

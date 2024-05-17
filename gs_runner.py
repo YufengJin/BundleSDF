@@ -36,10 +36,10 @@ from utils.slam_helpers import (
     transformed_params2rendervar,
     transformed_params2depthplussilhouette,
     transform_to_frame,
-    l1_loss_v1,
     quat_mult,
     matrix_to_quaternion,
 )
+from utils.loss_helper import l1_loss, l2_loss, log_mse_loss, psnr
 from datasets.bundlegs_datasets import relative_transformation, datautils
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 
@@ -55,12 +55,13 @@ def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
     if inital_pointcloud is not None:
         points = inital_pointcloud[:, :3]
         colors = np.zeros_like(points)
-        colors[:, 0] = 1
+        colors[:, 1] = 1
     else:
         num_points = 1000
         points = np.random.rand(num_points, 3)
         colors = np.random.rand(num_points, 3)
 
+    initial_pcd = np.concatenate([points, colors], axis=1)
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
     pcd.colors = o3d.utility.Vector3dVector(colors)
@@ -85,7 +86,7 @@ def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
 
         if new_pcd is not None:
             if inital_pointcloud is not None:
-                new_pcd = np.concatenate([inital_pointcloud, new_pcd], axis=0)
+                new_pcd = np.concatenate([initial_pcd, new_pcd], axis=0)
             pcd.points = o3d.utility.Vector3dVector(new_pcd[:, :3])
             pcd.colors = o3d.utility.Vector3dVector(new_pcd[:, 3:6])
 
@@ -514,6 +515,8 @@ class GSRunner:
         self._scale = scale
 
         self.debug_level = cfg_gs["debug_level"]
+
+        self._pcl_gt = pointcloud_gt
         
         # update debug level global
         global DEBUG_LEVEL
@@ -614,12 +617,19 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
-    def evaluate_poses(self, visualize=False):
-        if self._poses_gt is None:
+    def evaluate_poses(self, relative=False, visualize=False):
+        if self._poses_gt is None and not relative:
             return None
-        poses_gt = self._poses_gt.copy()
 
-        poses = self.get_optimized_cam_poses()
+        if self._rel_gt_poses is None and relative:
+            return None
+
+        if not relative:
+            poses_gt = self._poses_gt.copy()
+            poses = self.get_optimized_cam_poses(relative=relative)
+        else:
+            poses_gt = self._rel_gt_poses.cpu().numpy()
+            poses = self.get_optimized_cam_poses(relative=relative)
 
         assert isinstance(poses_gt, np.ndarray) and poses_gt.shape[1:] == (4, 4)
         assert isinstance(poses, np.ndarray) and poses.shape[1:] == (4, 4)
@@ -909,7 +919,7 @@ class GSRunner:
         # Create a point cloud object
         return np.concatenate((points, colors), axis=1)
 
-    def get_optimized_cam_poses(self):
+    def get_optimized_cam_poses(self, relative=False):
         opt_cam_poses = []
         with torch.no_grad():
             # get the first frame pose
@@ -931,10 +941,14 @@ class GSRunner:
                 w2c[:3, :3] = build_rotation(cam_rot)
                 w2c[:3, 3] = cam_tran
 
-                #w2c = w2c @ torch.linalg.inv(w2c0)
-                w2c = torch.linalg.inv(w2c)
 
-                opt_cam_poses.append(self._fisrt_c2w @ w2c.cpu().numpy())
+                if not relative:
+                    w2c = torch.linalg.inv(w2c)
+                    # TODO likely is wrong
+                    opt_cam_poses.append(self._fisrt_c2w @ w2c.cpu().numpy())
+                else:
+                    w2c = torch.linalg.inv(w2c)
+                    opt_cam_poses.append(w2c.cpu().numpy())
                 
         return np.asarray(opt_cam_poses)
 
@@ -1011,7 +1025,7 @@ class GSRunner:
 
             optimizer = self.initialize_optimizer(lr_dict, epoch)
             for iter in range(batch_iters):
-                loss, losses = self.train_once(batch_data, self.gaussians_iter, tracking=False, opt_both=False)
+                loss, losses = self.train_once(batch_data, self.gaussians_iter, tracking=True, opt_both=True)
                 loss /= len(batch_data)
 
                 # minimize systematic error for fisrt frame
@@ -1087,7 +1101,7 @@ class GSRunner:
                 optimizer.zero_grad(set_to_none=True)
 
                 # visualize all info of gaussians
-                if self.debug_level > 3 and self.gaussians_iter % 20 == 0:
+                if self.debug_level > 1 and self.gaussians_iter % self.cfg_gs['debug']['save_gaussians_info_every'] == 0 and self.cfg_gs['debug']['save_gaussians_info']:
                     grads = self.variables['means2D_gradient_accum'] / self.variables['denom']
                     grads[grads.isnan()] = 0.0
 
@@ -1100,9 +1114,9 @@ class GSRunner:
                     opacities = opacities.detach().cpu().numpy()
                     points = self.params['means3D'].detach().cpu().numpy()
 
-                    grad_pcd = visualize_gaussians(points, grads)
-                    sca_pcd = visualize_gaussians(points, max_scales)
-                    opa_pcd = visualize_gaussians(points, opacities)
+                    #grad_pcd = visualize_gaussians(points, grads)
+                    #sca_pcd = visualize_gaussians(points, max_scales)
+                    #opa_pcd = visualize_gaussians(points, opacities)
 
                 
                     # plt hist of grad max_scale, opacities
@@ -1120,11 +1134,11 @@ class GSRunner:
                     #o3d.visualization.draw([grad_pcd, sca_pcd, opa_pcd])
 
                 self.gaussians_iter += 1
-                trans_errs, rot_errs, cam_pcls = self.evaluate_poses(visualize=True)
+                trans_errs, rot_errs, cam_pcls = self.evaluate_poses(relative=True, visualize=True)
                 #trans_errs, rot_errs = self.evaluate_poses()
 
                 # save ply file
-                if self.debug_level > 2 and self.gaussians_iter % self.cfg_gs['save_params_interval'] == 0 and self.cfg_gs['save_params']:
+                if self.gaussians_iter % self.cfg_gs['save_ply_interval'] == 0 and self.cfg_gs['save_ply']:
                     params = params2cpu(self.params)
                     means = params['means3D']
                     scales = params['log_scales']
@@ -1189,32 +1203,32 @@ class GSRunner:
                     w2c[:3, 3] = cam_tran
                     curr_data["w2c"] = torch.linalg.inv(rel_w2c0) @ w2c
 
-                # # # update gaussian parameters
-                # if self.params['log_scales'].shape[1] == 1:
-                #     transform_rots = False # Isotropic Gaussians
-                # else:
-                #     transform_rots = True # Anisotropic Gaussians
+                # # update gaussian parameters
+                if self.params['log_scales'].shape[1] == 1:
+                    transform_rots = False # Isotropic Gaussians
+                else:
+                    transform_rots = True # Anisotropic Gaussians
                
-                # # Get Centers and Unnorm Rots of Gaussians in World Frame 
-                # pts = self.params['means3D'].detach()
-                # unnorm_rots = self.params['unnorm_rotations'].detach()
+                # Get Centers and Unnorm Rots of Gaussians in World Frame 
+                pts = self.params['means3D'].detach()
+                unnorm_rots = self.params['unnorm_rotations'].detach()
 
-                # transformed_gaussians = {}
-                # # Transform Centers of Gaussians to Camera Frame
-                # pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
-                # pts4 = torch.cat((pts, pts_ones), dim=1)
-                # transformed_pts = (rel_w2c0 @ pts4.T).T[:, :3]
-                # self.params["means3D"] = transformed_pts
+                transformed_gaussians = {}
+                # Transform Centers of Gaussians to Camera Frame
+                pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+                pts4 = torch.cat((pts, pts_ones), dim=1)
+                transformed_pts = (rel_w2c0 @ pts4.T).T[:, :3]
+                self.params["means3D"] = transformed_pts
 
-                # if transform_rots:
-                #     norm_rots = F.normalize(unnorm_rots)
-                #     transformed_rots = quat_mult(cam_rot0, norm_rots)
-                #     self.params['unnorm_rotations'] = transformed_rots
-                # else:
-                #     self.params['unnorm_rotations'] = unnorm_rots
+                if transform_rots:
+                    norm_rots = F.normalize(unnorm_rots)
+                    transformed_rots = quat_mult(cam_rot0, norm_rots)
+                    self.params['unnorm_rotations'] = transformed_rots
+                else:
+                    self.params['unnorm_rotations'] = unnorm_rots
                 
-                # self.params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in self.params.items()}
-                # torch.cuda.empty_cache()
+                self.params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) for k, v in self.params.items()}
+                torch.cuda.empty_cache()
 
             progress_bar.update(1)
 
@@ -1238,17 +1252,17 @@ class GSRunner:
             if not tracking:
                 if opt_both:
                     # optimize both camera and gaussians
-                    transformed_gaussians = transform_to_frame(
+                    transformed_gaussians, rel_w2c = transform_to_frame(
                         self.params, iter_time_idx, gaussians_grad=True, camera_grad=True
                     )
 
                 else:
                     # optimize only gaussians
-                    transformed_gaussians = transform_to_frame(
+                    transformed_gaussians, rel_w2c = transform_to_frame(
                         self.params, iter_time_idx, gaussians_grad=True, camera_grad=False
                     )
             else:
-                transformed_gaussians = transform_to_frame(
+                transformed_gaussians, rel_w2c = transform_to_frame(
                     self.params, iter_time_idx, gaussians_grad=False, camera_grad=True
                 )
 
@@ -1308,7 +1322,7 @@ class GSRunner:
                 
             # edge loss
             if not tracking:
-                edge_loss = torch.tensor(0.0).to(self.device) 
+                edge_loss = torch.abs(gt_edge - edge).mean()
             else:
                 edge_loss = torch.abs(gt_edge - edge).sum()
 
@@ -1316,9 +1330,9 @@ class GSRunner:
             
             # Depth loss
             if not tracking:
-                depth_loss = torch.abs(curr_data["depth"] - depth)[mask].mean()
+                depth_loss = l2_loss(depth, curr_data["depth"], mask, reduction="mean")
             else:
-                depth_loss = torch.abs(curr_data["depth"] - depth)[mask].sum()
+                depth_loss = l2_loss(depth, curr_data["depth"], mask, reduction="sum")
 
             curr_losses["depth"] = depth_loss
 
@@ -1349,7 +1363,7 @@ class GSRunner:
                 wandb.log(frame_losses)
 
             # visualize debugging images
-            if self.debug_level > 2 and (iter % 50 == 0):
+            if self.debug_level > 1 and (iter % self.cfg_gs['debug']['save_images_every'] == 0) and self.cfg_gs['debug']['save_images']:
                 # evaluate gaussian depth rendering
                 magnified_diff_depth = torch.abs(curr_data["depth"] - depth) * (mask_gt & presence_sil_mask & nan_mask)
                 depth_dist = magnified_diff_depth.mean()
@@ -1465,7 +1479,7 @@ class GSRunner:
                 )
                 plt.close()
 
-            if self.debug_level > 3 and iter % 50 == 0:
+            if self.debug_level == 3 and (iter+1) % 500 == 0:
                 # visualize the transformed gaussians 
                     # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
                 rel_w2c_gt =  self._rel_gt_poses[iter_time_idx]
@@ -1473,28 +1487,38 @@ class GSRunner:
                 rel_w2c_rot = rel_w2c_gt[:3, :3].unsqueeze(0).detach()
                 cam_rot_gt = matrix_to_quaternion(rel_w2c_rot)
 
-                with torch.no_grad():
-                    if self.params['log_scales'].shape[1] == 1:
-                        transform_rots = False # Isotropic Gaussians
-                    else:
-                        transform_rots = True # Anisotropic Gaussians
-
-                    pts = self.params['means3D']
-                    unnorm_rots = self.params['unnorm_rotations']
-                
+                if self._pcl_gt is not None:
                     transformed_gt_gaussians = {}
-                    # Transform Centers of Gaussians to Camera Frame
+                    pts = self._pcl_gt[:, :3]
+                    pts = torch.tensor(pts).cuda().float()
                     pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
                     pts4 = torch.cat((pts, pts_ones), dim=1)
                     transformed_pts = (rel_w2c_gt @ pts4.T).T[:, :3]
                     transformed_gt_gaussians['means3D'] = transformed_pts
-                    # Transform Rots of Gaussians to Camera Frame
-                    if transform_rots:
-                        norm_rots = F.normalize(unnorm_rots)
-                        transformed_rots = quat_mult(cam_rot_gt, norm_rots)
-                        transformed_gt_gaussians['unnorm_rotations'] = transformed_rots
-                    else:
-                        transformed_gt_gaussians['unnorm_rotations'] = unnorm_rots
+                    
+                else:
+                    with torch.no_grad():
+                        if self.params['log_scales'].shape[1] == 1:
+                            transform_rots = False # Isotropic Gaussians
+                        else:
+                            transform_rots = True # Anisotropic Gaussians
+
+                        pts = self.params['means3D']
+                        unnorm_rots = self.params['unnorm_rotations']
+                
+                        transformed_gt_gaussians = {}
+                        # Transform Centers of Gaussians to Camera Frame
+                        pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
+                        pts4 = torch.cat((pts, pts_ones), dim=1)
+                        transformed_pts = (rel_w2c_gt @ pts4.T).T[:, :3]
+                        transformed_gt_gaussians['means3D'] = transformed_pts
+                        # Transform Rots of Gaussians to Camera Frame
+                        if transform_rots:
+                            norm_rots = F.normalize(unnorm_rots)
+                            transformed_rots = quat_mult(cam_rot_gt, norm_rots)
+                            transformed_gt_gaussians['unnorm_rotations'] = transformed_rots
+                        else:
+                            transformed_gt_gaussians['unnorm_rotations'] = unnorm_rots
 
                 transformed_pcl = transformed_gaussians['means3D'].detach().cpu().numpy()
 
@@ -1514,7 +1538,10 @@ class GSRunner:
                 for k, v in curr_losses.items():
                     msg += f"\t{k} Loss: {v.item()}\n"
                 print(msg)
+
                 o3d.visualization.draw_geometries([transformed_pcd, transformed_gt_pcd, world_frame])
+                print(f"DEBUG: rel_w2c_gt: {rel_w2c_gt}, and rel_w2c: {rel_w2c}")
+                breakpoint()
 
                 
             # TODO not update every time, because optimizer is updated once per batch, ?????????

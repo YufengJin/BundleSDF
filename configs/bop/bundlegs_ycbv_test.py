@@ -6,9 +6,34 @@ scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", 
 primary_device="cuda:0"
 seed = 0
 use_gui = False
-debug_level= 3 
+debug_level= 3 # 0: No Debug, 1: Only Text Info, 2: Save Debug Images, 3: visualize gaussian, 4: Save gaussians ply
 
 scene_name = scenes[2]
+
+"""
+Object 01 (002_master_chef_can): [1.3360, -0.5000, 3.5105]
+Object 02 (003_cracker_box): [0.5575, 1.7005, 4.8050]
+Object 03 (004_sugar_box): [-0.9520, 1.4670, 4.3645]
+Object 04 (005_tomato_soup_can): [-0.0240, -1.5270, 8.4035]
+Object 05 (006_mustard_bottle): [1.2995, 2.4870, -11.8290]
+Object 06 (007_tuna_fish_can): [-0.1565, 0.1150, 4.2625]
+Object 07 (008_pudding_box): [1.1645, -4.2015, 3.1190]
+Object 08 (009_gelatin_box): [1.4460, -0.5915, 3.6085]
+Object 09 (010_potted_meat_can): [2.4195, 0.3075, 8.0715]
+Object 10 (011_banana): [-18.6730, 12.1915, -1.4635]
+Object 11 (019_pitcher_base): [5.3370, 5.8855, 25.6115]
+Object 12 (021_bleach_cleanser): [4.9290, -2.4800, -13.2920]
+Object 13 (024_bowl): [-0.2270, 0.7950, -2.9675]
+Object 14 (025_mug): [-8.4675, -0.6995, -1.6145]
+Object 15 (035_power_drill): [9.0710, 20.9360, -2.1190]
+Object 16 (036_wood_block): [1.4265, -2.5305, 17.1890]
+Object 17 (037_scissors): [7.0535, -28.1320, 0.0420]
+Object 18 (040_large_marker): [0.0460, -2.1040, 0.3500]
+Object 19 (051_large_clamp): [10.5180, -1.9640, -0.4745]
+Object 20 (052_extra_large_clamp): [-0.3950, -10.4130, 0.1620]
+Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
+
+"""
 
 target_object_id = 5    
 map_every = 1 
@@ -43,6 +68,8 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
+    save_params=True, # Save Parameters
+    save_params_interval=500, # Save Parameters Interval
     use_wandb=False,
     add_new_gaussians=False, # add new gaussians during training         
     add_gaussian_dict=dict( # Needs to be updated based on the number of mapping iterations
@@ -53,21 +80,14 @@ config = dict(
     train=dict(
         num_epochs=1,
         batch_size=10,
-        batch_iters=1,
+        batch_iters=5000,
         sil_thres=0.9,
         lrs=dict(
-            #means3D=0.0001,
-            #rgb_colors=0.0025,
-            #unnorm_rotations=0.001,
-            #logit_opacities=0.05,
-            #log_scales=0.001,
-            #cam_unnorm_rots=0.0
-            #cam_trans=0.00,
-            means3D=0.0,
-            rgb_colors=0.0,
-            unnorm_rotations=0.0,
-            logit_opacities=0.0,
-            log_scales=0.00,
+            means3D=0.0001,
+            rgb_colors=0.0025,
+            unnorm_rotations=0.001,
+            logit_opacities=0.05,
+            log_scales=0.001,
             cam_unnorm_rots=0.001,
             cam_trans=0.0001
         ),

@@ -301,4 +301,4 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     else:
         transformed_gaussians['unnorm_rotations'] = unnorm_rots
 
-    return transformed_gaussians
+    return transformed_gaussians, rel_w2c
