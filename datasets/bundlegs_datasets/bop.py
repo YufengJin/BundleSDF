@@ -111,7 +111,7 @@ class BOPDataset(GradSLAMDataset):
                     poses.append(obj_in_cam)
 
                     # update masks
-                    self._mask_paths.append(os.path.join(self.input_folder, "mask", f"{int(imIdx):06d}_{i:06d}.png"))
+                    self._mask_paths.append(os.path.join(self.input_folder, "mask_visib", f"{int(imIdx):06d}_{i:06d}.png"))
                     objFound = True
             if not objFound:
                 print(f"WARNING: Obj {int(self.target_object_id)} not found in image {imIdx:06d}")

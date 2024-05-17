@@ -875,7 +875,6 @@ class GSRunner:
                 
 
     def initialize_optimizer(self, lr_dict, epoch):
-
         lrs = lr_dict.copy()
         if epoch > 0:
             lrs["cam_unnorm_rots"] = lrs["cam_unnorm_rots"]/10.
@@ -1012,7 +1011,7 @@ class GSRunner:
 
             optimizer = self.initialize_optimizer(lr_dict, epoch)
             for iter in range(batch_iters):
-                loss, losses = self.train_once(batch_data, self.gaussians_iter, tracking=True, opt_both=True)
+                loss, losses = self.train_once(batch_data, self.gaussians_iter, tracking=False, opt_both=False)
                 loss /= len(batch_data)
 
                 # minimize systematic error for fisrt frame
@@ -1124,6 +1123,21 @@ class GSRunner:
                 trans_errs, rot_errs, cam_pcls = self.evaluate_poses(visualize=True)
                 #trans_errs, rot_errs = self.evaluate_poses()
 
+                # save ply file
+                if self.debug_level > 2 and self.gaussians_iter % self.cfg_gs['save_params_interval'] == 0 and self.cfg_gs['save_params']:
+                    params = params2cpu(self.params)
+                    means = params['means3D']
+                    scales = params['log_scales']
+                    rotations = params['unnorm_rotations']
+                    rgbs = params['rgb_colors']
+                    opacities = params['logit_opacities']
+                    ply_root = os.path.join(self.cfg_gs['workdir'], self.cfg_gs['run_name'], f"iter_{self.gaussians_iter}")
+                    if not os.path.exists(ply_root):
+                        os.makedirs(ply_root)
+
+                    ply_path = os.path.join(ply_root, "splats.ply")
+                    save_ply(ply_path, means, scales, rotations, rgbs, opacities)
+
                 if self.run_gui:
                     with self.gui_lock:
                         obj_pcl = self.get_xyz_rgb_params()
@@ -1204,16 +1218,6 @@ class GSRunner:
 
             progress_bar.update(1)
 
-        # save ply file
-        if False:
-            params = params2cpu(self.params)
-            means = params['means3D']
-            scales = params['log_scales']
-            rotations = params['unnorm_rotations']
-            rgbs = params['rgb_colors']
-            opacities = params['logit_opacities']
-
-            ply_path = os.path.join(self.cfg_gs['workdir'], self.cfg_gs['run_name'], "splats.ply")
 
 
     def train_once(self, batch_data, iter, dssim_weight=0.2, tracking=False, opt_both=True):
@@ -1345,7 +1349,7 @@ class GSRunner:
                 wandb.log(frame_losses)
 
             # visualize debugging images
-            if self.debug_level > 3 and (iter % 50 == 0):
+            if self.debug_level > 2 and (iter % 50 == 0):
                 # evaluate gaussian depth rendering
                 magnified_diff_depth = torch.abs(curr_data["depth"] - depth) * (mask_gt & presence_sil_mask & nan_mask)
                 depth_dist = magnified_diff_depth.mean()
@@ -1461,7 +1465,7 @@ class GSRunner:
                 )
                 plt.close()
 
-            if self.debug_level > 2 and iter % 50 == 0:
+            if self.debug_level > 3 and iter % 50 == 0:
                 # visualize the transformed gaussians 
                     # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
                 rel_w2c_gt =  self._rel_gt_poses[iter_time_idx]

@@ -32,7 +32,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    mode='disabled'
+    #mode='disabled'
 )
 
 def preprocess_data(
@@ -184,13 +184,6 @@ def run_once(config: dict):
         # convert BGR to RGB
         color = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
 
-        print(gt_pose)
-        plt.subplot(2, 2, 1); plt.imshow(color); plt.title('color')
-        plt.subplot(2, 2, 2); plt.imshow(depth); plt.title('depth')
-        plt.subplot(2, 2, 3); plt.imshow(mask); plt.title('mask')
-        plt.show()
-        1/0
-
         if time_idx == 0:
             if mask is None:
                 # get initial mask through labeling 
@@ -208,6 +201,10 @@ def run_once(config: dict):
         if cfg_bundletrack['erode_mask']>0:
             kernel = np.ones((cfg_bundletrack['erode_mask'], cfg_bundletrack['erode_mask']), np.uint8)
             mask = cv2.erode(mask.astype(np.uint8), kernel)
+
+        if mask.sum() < 1e3:
+            print("ERROR: Mask is empty")
+            continue
 
         if time_idx < first_num_frames:
             curr_data['colors'].append(color)
@@ -282,11 +279,11 @@ def run_once(config: dict):
                 K=Ks[0],
                 poses=gt_glc2ws,
                 total_num_frames=num_frames,
-                pointcloud=pcl_gt,
+                pointcloud=pcl,
                 #pointcloud_gt=pcl_gt,
                 poses_gt=gt_glc2ws.copy(),
                 wandb_run=wandb_run,
-                #run_gui=True,
+                run_gui=True,
             )
 
             gsRunner.train()
