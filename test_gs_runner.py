@@ -302,10 +302,10 @@ def run_once(config: dict):
                 #pointcloud_gt=pcl_gt,
                 poses_gt=gt_glc2ws.copy(),
                 wandb_run=wandb_run,
-                run_gui=False,
+                run_gui=True,
             )
+            gsRunner.train_v1()
             1/0
-            gsRunner.train()
 
         else:
             colors = curr_data['colors'].copy()

@@ -53,20 +53,16 @@ from utils.slam_helpers import (
 from datasets.bundlegs_datasets import relative_transformation, datautils
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 from utils.graphics_utils import getWorld2View_torch, getProjectionMatrix, BasicPointCloud
+from utils.gs_helpers import visualize_camera_poses
 from scene import Camera, GaussianModel
-
+from utils.gaussian_renderer import render
+from utils.sh_utils import SH2RGB
 from diff_gaussian_rasterization import GaussianRasterizer, GaussianRasterizationSettings
 
-def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
-    # initialize pointcloud
-    if inital_pointcloud is not None:
-        points = inital_pointcloud[:, :3]
-        colors = np.zeros_like(points)
-        colors[:, 0] = 1
-    else:
-        num_points = 1000
-        points = np.random.rand(num_points, 3)
-        colors = np.random.rand(num_points, 3)
+def run_gui_thread(gui_lock, gui_dict):
+    num_points = 1000
+    points = np.random.rand(num_points, 3)
+    colors = np.random.rand(num_points, 3)
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
@@ -87,22 +83,45 @@ def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
                 del gui_dict["pointcloud"]
             else:
                 new_pcd = None
+
+            if "image" in gui_dict:
+                new_image = gui_dict["image"]
+                del gui_dict["image"]
+            else:
+                new_image = None
+
         if join:
             break
 
         if new_pcd is not None:
-            if inital_pointcloud is not None:
-                new_pcd = np.concatenate([inital_pointcloud, new_pcd], axis=0)
             pcd.points = o3d.utility.Vector3dVector(new_pcd[:, :3])
             pcd.colors = o3d.utility.Vector3dVector(new_pcd[:, 3:6])
+
+        # if new_image is not None:
+        #     cv2.imshow("Diff", new_image)
 
         time.sleep(0.05)
         vis.update_geometry(pcd)
         vis.poll_events()
         vis.update_renderer()
 
+    cv2.destroyWindow("Diff")
     vis.destroy_window()
 
+def c2w_to_RT(c2w):
+    # c2w must in colmap format
+    assert isinstance(c2w, np.ndarray) 
+    w2c = np.linalg.inv(c2w)
+    R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+    T = w2c[:3, 3]
+    return R, T
+
+def c2w_to_RT_torch(c2w):
+    assert isinstance(c2w, torch.Tensor)
+    w2c = torch.linalg.inv(c2w)
+    R = w2c[:3,:3].t()  # R is stored transposed due to 'glm' in CUDA code
+    T = w2c[:3, 3]
+    return R, T
 
 class GSRunner:
     def __init__(
@@ -143,37 +162,39 @@ class GSRunner:
         self.fovx = 2 * math.atan(image_width / (2 * fx))
         self.fovy = 2 * math.atan(image_height / (2 * fy))
 
-        poses[:, :3, 1:3] *= -1          
+        poses[:, :3, 1:3] *= -1      # from opengl to colmap
         poses = torch.tensor(poses).to(self.device).type(self.dtype)
-        
-        #self.setup_init_camera_params(K)
 
         # uniform sampling using octree
-        normal_pts = np.asarray(pointcloud_normalized.points).copy()
-        normal_cls = np.asarray(pointcloud_normalized.colors).copy()
-        self.octree_m = None
+        if pointcloud_normalized is not None:
+            normal_pts = np.asarray(pointcloud_normalized.points).copy()
+            normal_cls = np.asarray(pointcloud_normalized.colors).copy()
+            self.octree_m = None
 
-        # TODO how to trully use octree
-        if self.cfg_gs['use_octree']:
-            pts, cols = self.build_octree(normal_pts, normal_cls)
+            # TODO how to trully use octree
+            if self.cfg_gs['use_octree']:
+                pts, cols = self.build_octree(normal_pts, normal_cls)
+        
+            else:
+                pts = torch.tensor(normal_pts).cuda().float()
+                cols = torch.tensor(normal_cls).cuda().float()
+        
+        else:
+            # create random pointcloud in unit cube [-1, 1]
+            pts = torch.rand((10000, 3)).cuda().float() * 2 - 1
+            cols = torch.ones((10000, 3)).cuda().float() * 0.5
 
-        opts = ConfigParams(**self.cfg_gs["gaussians_model"])
+        self.opt = ConfigParams(**self.cfg_gs["gaussians_model"])
         self.pipe = ConfigParams(**self.cfg_gs["pipe"])
 
-        self.gaussians = GaussianModel(opts.sh_degree)
-        self.gaussians.training_setup(opts)
-        
+        self.gaussians = GaussianModel(self.opt.sh_degree)
         pcd = BasicPointCloud(pts.cpu().numpy(), cols.cpu().numpy(), None)
         self.gaussians.create_from_pcd(pcd, self.cfg_gs['sc_factor'])
 
-        #self.create_gaussians(pts, cols)
+        self.gaussians.training_setup(self.opt)
+        
 
-        # intialize cam error
-        # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
-        #self.params["cam_rel_rots"] = torch.zeros((self._total_num_frames, 3)).cuda().float().contiguous().requires_grad_(True)
-        #self.params["cam_rel_trans"] = torch.zeros((self._total_num_frames, 3)).cuda().float().contiguous().requires_grad_(True)
-
-        self.gaussians_iter = 0
+        self.gaussians_iter = 0 
         self.curr_frame_id = 0
 
         self.datas = []
@@ -189,15 +210,14 @@ class GSRunner:
             self.gui_dict = {"join": False}
             gui_runner = threading.Thread(
                 target=run_gui_thread,
-                args=(self.gui_lock, self.gui_dict, pointcloud_gt),
+                args=(self.gui_lock, self.gui_dict),
             )
             gui_runner.start()
 
         # prepare data from training
         for color, depth, mask, c2w in zip(colors, depths, masks, poses):
             iter_time_idx = self.curr_frame_id
-            R = c2w[:3, :3]
-            t = c2w[:3, 3]
+            R, t = c2w_to_RT_torch(c2w)
             viewpoint = Camera(
                 iter_time_idx,
                 color,
@@ -220,7 +240,7 @@ class GSRunner:
                 }
             )
             self.curr_frame_id += 1
-
+            
     def add_new_frame(self, rgbs, depths, masks, poses):
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
         poses[:, :3, 1:3] = -poses[:, :3, 1:3]
@@ -230,9 +250,7 @@ class GSRunner:
 
         for color, depth, mask, c2w in zip(colors, depths, masks, poses):
             iter_time_idx = self.curr_frame_id
-            R = c2w[:3, :3]
-            t = c2w[:3, 3]
-
+            R, t = c2w_to_RT_torch(c2w)
             viewpoint = Camera(
                 iter_time_idx,
                 color,
@@ -256,98 +274,6 @@ class GSRunner:
             )
             self.curr_frame_id += 1
 
-    def setup_init_camera_params(self, K, near=0.01, far=100):
-        if not isinstance(K, torch.Tensor):
-            K = torch.tensor(K).to(self.device).type(self.dtype)
-
-        fx, fy, cx, cy = K[0][0], K[1][1], K[0][2], K[1][2]
-
-        tanfovx = self.cam_params["image_width"] / (2 * fx)
-        tanfovy = self.cam_params["image_height"] / (2 * fy)
-        fovx = 2 * torch.atan(tanfovx)
-        fovy = 2 * torch.atan(tanfovy)
-        project_matrix = getProjectionMatrix(near, far, fovx.item(), fovy.item()).to(self.device).type(self.dtype)
-
-        bg=torch.tensor([0, 0, 0]).to(self.device).type(self.dtype)
-        scale_modifier=1.0
-
-        self.cam_params["bg"] = bg
-        self.cam_params["scale_modifier"] = scale_modifier
-        self.cam_params["proj_matrix"] = project_matrix
-        self.cam_params["tanfovx"] = tanfovx
-        self.cam_params["tanfovy"] = tanfovy
-        self.cam_params['fovx'] = fovx
-        self.cam_params['fovy'] = fovy
-        self.cam_params['active_sh_degree'] = self.active_sh_degree
-
-
-    def create_gaussians(self, pts=None, cols=None, num_gaussians=10_000):
-        if pts is None and cols is None:
-            # random points from [-1, -1, -1, 1, 1, 1]
-            pts = np.random.rand(num_gaussians, 3) * 2 - 1
-            cols = np.ones((num_gaussians, 3)) * 0.5
-
-        if not isinstance(pts, torch.Tensor):
-            pts = torch.tensor(pts).to(self.device).type(self.dtype)
-        if not isinstance(cols, torch.Tensor):
-            cols = torch.tensor(cols).to(self.device).type(self.dtype)
-
-        means3D = pts
-        rgb_colors = cols
-
-        if self.cfg_gs["rgb2sh"]: 
-            fused_color = RGB2SH(rgb_colors)
-            features = torch.zeros((fused_color.shape[0], 3, (self.cfg_gs['max_sh_degree'] + 1) ** 2)).float().cuda()
-            features[:, :3, 0 ] = fused_color
-            features[:, 3:, 1:] = 0.0
-            features_dc = features[:,:,0:1].transpose(1, 2)
-            features_rest = features[:,:,1:].transpose(1, 2)
-
-        else:
-            features_dc = None
-            features_rest = None
-
-        num_pts = means3D.shape[0]
-        rots = torch.tile(torch.tensor([1, 0, 0, 0]), (num_pts, 1)).to(self.device).type(self.dtype)
-
-        opacities = inverse_sigmoid(0.1 * torch.ones((num_pts, 1)).to(self.device).type(self.dtype))
-
-        dist2 = torch.clamp_min(distCUDA2(means3D), 0.0000001)
-
-        if self.cfg_gs["gaussian_distribution"] == "isotropic":
-            log_scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 1)
-        elif self.cfg_gs["gaussian_distribution"] == "anisotropic":
-            log_scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-        elif self.cfg_gs["gaussian_distribution"] == "anisotropic_2d":
-            log_scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 1)
-            log_scales = torch.cat((log_scales, log_scales, -1e5 * torch.ones_like(log_scales)), dim=1)
-        else:
-            raise ValueError(f"Unknown gaussian_distribution {self.cfg_gs['gaussian_distribution']}")
-
-        params = {
-            "means3D": means3D,
-            "rgb_colors": rgb_colors,
-            "unnorm_rotations": rots,
-            "logit_opacities": opacities,
-            "log_scales": log_scales,
-            "features_dc": features_dc,
-            "features_rest": features_rest
-        }
-
-        self.params = {k: torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True)) if v is not None else None for k, v in params.items()}
-
-        self.variables = {
-            "max_2D_radius": torch.zeros(params["means3D"].shape[0]).cuda().float(),
-            "means2D_gradient_accum": torch.zeros(params["means3D"].shape[0]).cuda().float(),
-            "denom": torch.zeros(params["means3D"].shape[0]).cuda().float(),
-            #"timestep": torch.zeros(params["means3D"].shape[0]).cuda().float(),
-        }        
-        
-        center_pcl = torch.mean(means3D, dim=0)
-        radius = torch.norm(means3D - center_pcl, dim=1).max()
-        # Initialize an estimate of scene radius for Gaussian-Splatting Densification, TODO understanding variables scene_radius
-        self.variables["scene_radius"] = 2 * radius 
-        
     def build_octree(self, normal_pts, normal_cls):
         if self.cfg_gs["save_octree_clouds"]:
             dir = os.path.join(self.cfg_gs['workdir'], self.cfg_gs['run_name'], "build_octree_cloud.ply")
@@ -432,6 +358,191 @@ class GSRunner:
         masks = masks.permute(0, 3, 1, 2)
 
         return (colors, depths, masks)
+    
+    def get_loss(self, viewpoint, color, depth=None, opacity=None, tracking=True, dssim_weight=0.2):
+        assert viewpoint.color is not None and viewpoint.mask is not None
+        if depth is not None:
+            assert viewpoint.depth is not None
+        
+        loss = torch.tensor(0.0).to(self.device)
+        
+        if not tracking:
+            loss_weights = self.cfg_gs["train"]["loss_weights"]['mapping']
+        else:
+            loss_weights = self.cfg_gs["train"]["loss_weights"]['tracking']
+
+        presence_sil_mask = opacity > self.cfg_gs["train"]["sil_thres"]
+        nan_mask = (~torch.isnan(depth))
+
+        mask_gt = viewpoint.mask.bool()
+        gt_im = viewpoint.color
+
+        mask = mask_gt & presence_sil_mask & nan_mask
+
+        # canny edge detection
+        gt_gray = ki.color.rgb_to_grayscale(gt_im.unsqueeze(0))
+
+        # sobel edges
+        gt_edge = ki.filters.sobel(gt_gray).squeeze(0)
+        # canny edges TODO ablation test
+        # gt_edge= ki.filters.canny(gt_gray)[0]
+
+        gray = ki.color.rgb_to_grayscale(color.unsqueeze(0))
+
+        # sobel edges
+        edge = ki.filters.sobel(gray).squeeze(0)
+
+        # edge loss
+        if not tracking:
+            edge_loss = torch.tensor(0.0).to(self.device) 
+        else:
+            edge_loss = torch.abs(gt_edge - edge).sum()
+
+        loss += loss_weights['edge'] * edge_loss
+        
+        if depth is not None:   
+            # Depth loss
+            if not tracking:
+                depth_loss = torch.abs(viewpoint.depth - depth)[mask].mean()
+            else:
+                depth_loss = torch.abs(viewpoint.depth - depth)[mask].sum()
+
+            loss += loss_weights['depth'] * depth_loss
+
+        # silhouette loss
+        if not tracking:
+            silhouette_loss = torch.abs(opacity.float() - viewpoint.mask).mean()
+        else:
+            silhouette_loss = torch.tensor(0.0).to(self.device)
+
+        loss += loss_weights['silhouette'] * silhouette_loss
+
+        # color loss
+        color_mask = torch.tile(mask, (3, 1, 1))
+        color_mask = color_mask.detach()
+
+        rgbl1 = torch.abs(gt_im - color)[color_mask].mean()
+        im_loss = (1-dssim_weight) * rgbl1 + dssim_weight * (1.0 - calc_ssim(color, gt_im))
+        loss += loss_weights['im'] * im_loss
+
+        # visualize debugging images
+        if self.debug_level > 2:
+            # evaluate gaussian depth rendering
+            magnified_diff_depth = torch.abs(viewpoint.depth - depth) * (mask_gt & presence_sil_mask & nan_mask)
+            depth_dist = magnified_diff_depth.mean()
+
+            fig, ax = plt.subplots(4, 4, figsize=(12, 12))
+            weighted_render_im = color * color_mask
+            weighted_im = viewpoint.color * color_mask
+            weighted_render_depth = depth * mask
+            weighted_depth = viewpoint.depth * mask
+            weighted_render_candy = (edge) 
+            weighted_candy = (gt_edge)
+            viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
+
+            diff_rgb = (
+                torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
+            )
+            diff_depth = (
+                torch.abs(weighted_render_depth - weighted_depth)
+                .mean(dim=0)
+                .detach()
+                .cpu()
+            )
+
+            diff_candy = (
+                torch.abs(weighted_render_candy - weighted_candy)
+                .mean(dim=0)
+                .detach()
+                .cpu()
+            )
+            diff_sil = (
+                torch.abs(presence_sil_mask.float() - viewpoint.mask)
+                .squeeze(0)
+                .detach()
+                .cpu()
+            )
+            ax[0, 0].imshow(viz_img)
+            ax[0, 0].set_title("Weighted GT RGB")
+            viz_render_img = torch.clip(
+                weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1
+            )
+            ax[1, 0].imshow(viz_render_img)
+            ax[1, 0].set_title("Weighted Rendered RGB")
+            ax_im = ax[0, 1].imshow(weighted_depth[0].detach().cpu())
+            cbar = fig.colorbar(ax_im, ax=ax[0, 1])
+            ax[0, 1].set_title("Weighted GT Depth")
+            ax_im = ax[1, 1].imshow(
+                weighted_render_depth[0].detach().cpu())
+            cbar = fig.colorbar(ax_im, ax=ax[1, 1])
+            ax[1, 1].set_title("Weighted Rendered Depth")
+            ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
+            ax[0, 2].set_title(f"Diff RGB, Loss: {im_loss.item()}")
+            ax_im = ax[1, 2].imshow(diff_depth, cmap="jet", vmin=0, vmax=0.8)
+            cbar = fig.colorbar(ax_im, ax=ax[1, 2])
+            ax[1, 2].set_title(f"Diff Depth, Loss: {depth_loss.item()}, \nMean Depth Dist: {depth_dist:.6f}")
+            ax_im = ax[0, 3].imshow(opacity.detach().squeeze().cpu())
+            cbar = fig.colorbar(ax_im, ax=ax[0, 3])
+            ax[0, 3].set_title("Silhouette Mask")
+            ax[1, 3].imshow(mask[0].detach().cpu(), cmap="gray")
+            ax[1, 3].set_title("Loss Mask")
+            ax[2, 0].imshow(viewpoint.mask.detach().squeeze().cpu())
+            ax[2, 0].set_title("gt Mask")
+            ax_im = ax[2, 1].imshow(magnified_diff_depth.detach().squeeze().cpu(), cmap="jet", vmin=0, vmax=0.02)
+            cbar = fig.colorbar(ax_im, ax=ax[2, 1])
+            ax[2, 1].set_title("Masked Diff Depth")
+            ax[2, 2].imshow(
+                (color.permute(1, 2, 0).detach().squeeze().cpu().numpy() * 255).astype(
+                    np.uint8
+                )
+            )
+            ax[2, 2].set_title("Rendered RGB")
+            ax[2, 3].imshow(gt_im.permute(1, 2, 0).detach().squeeze().cpu())
+            ax[2, 3].set_title("GT RGB")
+            ax[3, 0].imshow(
+                torch.clamp(
+                    weighted_candy.permute(1, 2, 0).detach().squeeze().cpu(), 0.0, 1.0
+                ),
+                cmap="jet",
+            )
+            ax[3, 0].set_title("Weighted GT canny")
+            # A3d colorbar
+            ax[3, 1].imshow(
+                torch.clamp(
+                    weighted_render_candy.permute(1, 2, 0).detach().squeeze().cpu(),
+                    0.0,
+                    1.0,
+                ),
+                cmap="jet",
+            )
+            ax[3, 1].set_title("Weighted rendered canny")
+            ax[3, 2].imshow(
+                torch.clamp(diff_candy.detach().squeeze().cpu(), 0.0, 1.0), cmap="jet"
+            )
+            ax[3, 2].set_title(f"Diff Edge: {edge_loss.item()}")
+            ax[3, 3].imshow(diff_sil, cmap="jet")
+            ax[3, 3].set_title(f"Silhouette Loss: {silhouette_loss.item()}")
+            # Turn off axis
+            for i in range(2):
+                for j in range(4):
+                    ax[i, j].axis("off")
+            # Set Title
+            suptitle = f"frame_id: {viewpoint.uid} Training Iteration: {iter}"
+            fig.suptitle(suptitle, fontsize=16)
+            # Figure Tight Layout
+            fig.tight_layout()
+            plot_dir = os.path.join(self.cfg_gs['workdir'], self.cfg_gs['run_name'],'gs_loss_plots') 
+            if not os.path.exists(plot_dir):
+                os.makedirs(plot_dir)
+
+            current_time = datetime.datetime.now()
+            filename = current_time.strftime("%Y-%m-%d_%H-%M-%S")
+            plt.savefig(
+                os.path.join(plot_dir, f"{filename}.png"), bbox_inches="tight", dpi=180
+            )
+            plt.close()
+
+        return loss
 
     def train_v1(self):
         # maping and tracking seperately
@@ -440,11 +551,131 @@ class GSRunner:
         while len(self.datas) > 0:
             curr_data = self.datas.pop(0)
             time_idx = curr_data["id"]
+            viewpoint = curr_data["viewpoint"]
             if time_idx > 0:
-                if self.cfg_gs['add_new_gaussians']:
-                    print(f"INFO: Adding new gaussians for frame {time_idx}")
-                    self.add_new_gaussians(curr_data)         
+                # intialize the camera optimizer
+                opt_params = []
+                opt_params.append(
+                    {
+                        "params": [viewpoint.cam_rot_delta],
+                        "lr": 0.01, 
+                        "name": "rot_{}".format(viewpoint.uid),
+                    }
+                )
+                opt_params.append(
+                    {
+                        "params": [viewpoint.cam_trans_delta],
+                        "lr": 0.001,
+                        "name": "trans_{}".format(viewpoint.uid),
+                    }
+                )
 
+                pose_optimizer = torch.optim.Adam(opt_params)
+
+                best_R, best_t = viewpoint.R, viewpoint.T
+                prev_loss = 1e6
+                print(f"INFO: TRACKING STARTED FOR FRAME {time_idx}")
+                for iter in range(self.cfg_gs['train']['tracking_iters']):
+                    render_pkg = render(viewpoint, self.gaussians, self.pipe, self.bg)
+                    image, viewspace_point_tensor, visibility_filter, radii, depth, opacity= render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["depth"], render_pkg["opacity"]
                     
+                    loss = self.get_loss(viewpoint, image, depth, opacity, tracking=True)
+                    pose_optimizer.zero_grad()
+                    loss.backward()
+                    
+                    if self.run_gui:
+                        gt_image_np = viewpoint.color.detach().cpu().numpy().transpose(1, 2, 0)
+                        image_np    = image.detach().cpu().numpy().transpose(1, 2, 0)
+                        gt_image_np = (gt_image_np * 255).astype(np.uint8)
+                        image_np = (image_np * 255).astype(np.uint8)
+                        images = np.hstack((gt_image_np, image_np))
+                        images = cv2.cvtColor(images, cv2.COLOR_BGR2RGB)
 
-        
+                        text = f"Tracking Iteration: {iter} on frame {time_idx} Loss: {loss.item():.6f}"
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 1
+                        font_thickness = 2
+                        text_color = (255, 255, 255)  # White color
+                        text_position = (50, 50)
+                        cv2.putText(images, text, text_position, font, font_scale, text_color, font_thickness)
+
+                        xyz = self.gaussians.get_xyz.detach().cpu().numpy()
+                        features = self.gaussians.get_features.detach().cpu().numpy()
+                        rgb = SH2RGB(features)[:, 0, :]
+                        pcl = np.concatenate((xyz, rgb), axis=1)
+                        with self.gui_lock:
+                            self.gui_dict["image"] = images
+                            self.gui_dict["pointcloud"] = pcl
+
+                    print(f"INFO: TRACKING ITERATION {iter} LOSS: {loss.item()}")
+
+                    with torch.no_grad():
+                        pose_optimizer.step()
+                        viewpoint.update()
+                        converged = viewpoint.update()
+                        
+                        if loss < prev_loss:
+                            best_R, best_t = viewpoint.R, viewpoint.T
+                            prev_loss = loss
+
+                        # if converged:
+                        #     break
+
+
+            print(f"INFO: MAPPING STARTED FOR FRAME {time_idx}")    
+            for iter in range(self.cfg_gs['train']['mapping_iters']):
+                self.gaussians.update_learning_rate(self.gaussians_iter)
+                if self.gaussians_iter % 1000 == 0:
+                    self.gaussians.oneupSHdegree()
+
+                render_pkg = render(viewpoint, self.gaussians, self.pipe, self.bg)
+                image, viewspace_point_tensor, visibility_filter, radii, depth, opacity= render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["depth"], render_pkg["opacity"]
+                
+                loss = self.get_loss(viewpoint, image, depth, opacity, tracking=False)
+                loss.backward()
+                print(f"INFO: MAPPING ITERATION {iter} LOSS: {loss.item()}")
+
+                if self.run_gui:
+                    gt_image_np = viewpoint.color.detach().cpu().numpy().transpose(1, 2, 0)
+                    image_np    = image.detach().cpu().numpy().transpose(1, 2, 0)
+                    gt_image_np = (gt_image_np * 255).astype(np.uint8)
+                    image_np = (image_np * 255).astype(np.uint8)
+                    images = np.hstack((gt_image_np, image_np))
+                    images = cv2.cvtColor(images, cv2.COLOR_BGR2RGB)
+
+                    text = f"Mapping Iteration: {iter} on frame {time_idx} Loss: {loss.item():.6f}"
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 1
+                    font_thickness = 2
+                    text_color = (255, 255, 255)  # White color
+                    text_position = (50, 50)
+                    cv2.putText(images, text, text_position, font, font_scale, text_color, font_thickness)
+
+                    xyz = self.gaussians.get_xyz.detach().cpu().numpy()
+                    features = self.gaussians.get_features.detach().cpu().numpy()
+                    rgb = SH2RGB(features)[:, 0, :]
+                    pcl = np.concatenate((xyz, rgb), axis=1)
+                    with self.gui_lock:
+                        self.gui_dict["image"] = images
+                        self.gui_dict["pointcloud"] = pcl
+                
+                with torch.no_grad():
+                    # Densification
+                    if self.gaussians_iter < self.opt.densify_until_iter:
+                        # Keep track of max radii in image-space for pruning
+                        self.gaussians.max_radii2D[visibility_filter] = torch.max(self.gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                        self.gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+                        if self.gaussians_iter > self.opt.densify_from_iter and self.gaussians_iter % self.opt.densification_interval == 0:
+                            size_threshold = 20 if self.gaussians_iter > self.opt.opacity_reset_interval else None
+                            self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, 0.005, self.cfg_gs['sc_factor'] , size_threshold)
+
+                        # if self.gaussians_iter % self.opt.opacity_reset_interval == 0 or (self.bg.item() == [1, 1, 1] and self.gaussians_iter == self.opt.densify_from_iter):
+                        #     self.gaussians.reset_opacity()
+
+                    # Optimizer step
+                    if self.gaussians_iter < 30_000:
+                        self.gaussians.optimizer.step()
+                        self.gaussians.optimizer.zero_grad(set_to_none = True)
+
+                self.gaussians_iter += 1

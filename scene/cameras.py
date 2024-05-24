@@ -85,7 +85,7 @@ class Camera(nn.Module):
         return self.world_view_transform.inverse()[3, :3]
 
     @torch.no_grad()
-    def step(self, converged_threshold=1e-5):
+    def update(self, converged_threshold=1e-5):
         tau = torch.cat([self.cam_trans_delta, self.cam_rot_delta], axis=0)
         
         T_w2c = torch.eye(4, device=self.device)

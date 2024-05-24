@@ -7,7 +7,7 @@ scenes = ["000000", "000001", "000002", "000003", "000004", "000005", "000006", 
 primary_device="cuda:0"
 seed = 0
 use_gui = False
-debug_level= 3 
+debug_level= 0 
 
 scene_name = scenes[0]
 
@@ -41,7 +41,7 @@ map_every = 1
 keyframe_every = 5
 mapping_window_size = 24
 tracking_iters = 80 
-mapping_iters = 80
+mapping_iters = 1000
 
 group_name = "bop"
 run_name = f"{scene_name}_{seed}"
@@ -84,6 +84,27 @@ config = dict(
         every_iter=100,
         sil_thres=0.8,
         depth_thres=0.01,
+    ),
+    pipe=dict(
+        convert_SHs_python = False,
+        compute_cov3D_python = False
+    ),
+    gaussians_model = dict(
+        sh_degree=3,
+        position_lr_init=0.00016,              
+        position_lr_final=0.0000016,            
+        position_lr_delay_mult=0.01,
+        position_lr_max_steps=30_000,
+        feature_lr=0.0025,
+        opacity_lr=0.05,
+        scaling_lr=0.005,
+        rotation_lr=0.001,
+        percent_dense=0.01,
+        densification_interval=100,
+        opacity_reset_interval=3000,
+        densify_from_iter=500,
+        densify_until_iter=15_000,
+        densify_grad_threshold=0.0002
     ),
     train=dict(
         num_epochs=1,
