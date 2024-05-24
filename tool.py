@@ -39,7 +39,7 @@ def compute_translation_scales(pts,max_dim=2,cluster=True, eps=0.06, min_samples
   return translation_cvcam, sc_factor, keep_mask
 
 
-def compute_scene_bounds_worker(color_file,K,glcam_in_world,use_mask,rgb=None,depth=None,mask=None):
+def compute_scene_bounds_worker(color_file,K,glcam_in_world,use_mask,rgb=None,depth=None,mask=None, voxel_size=0.01):
   if rgb is None:
     depth_file = color_file.replace('images','depth_filtered')
     mask_file = color_file.replace('images','masks')
@@ -69,6 +69,9 @@ def compute_scene_bounds(color_files,glcam_in_worlds,K,use_mask=True,base_dir=No
 
   if base_dir is None:
     base_dir = os.path.dirname(color_files[0])+'/../'
+
+  if not os.path.exists(base_dir):
+    os.makedirs(base_dir)
 
   args = []
   if rgbs is not None:

@@ -20,6 +20,76 @@ class BasicPointCloud(NamedTuple):
     colors : np.array
     normals : np.array
 
+def rt2mat(R, T):
+    mat = np.eye(4)
+    mat[0:3, 0:3] = R
+    mat[0:3, 3] = T
+    return mat
+
+
+def skew_sym_mat(x):
+    device = x.device
+    dtype = x.dtype
+    ssm = torch.zeros(3, 3, device=device, dtype=dtype)
+    ssm[0, 1] = -x[2]
+    ssm[0, 2] = x[1]
+    ssm[1, 0] = x[2]
+    ssm[1, 2] = -x[0]
+    ssm[2, 0] = -x[1]
+    ssm[2, 1] = x[0]
+    return ssm
+
+
+def SO3_exp(theta):
+    device = theta.device
+    dtype = theta.dtype
+
+    W = skew_sym_mat(theta)
+    W2 = W @ W
+    angle = torch.norm(theta)
+    I = torch.eye(3, device=device, dtype=dtype)
+    if angle < 1e-5:
+        return I + W + 0.5 * W2
+    else:
+        return (
+            I
+            + (torch.sin(angle) / angle) * W
+            + ((1 - torch.cos(angle)) / (angle**2)) * W2
+        )
+
+
+def V(theta):
+    dtype = theta.dtype
+    device = theta.device
+    I = torch.eye(3, device=device, dtype=dtype)
+    W = skew_sym_mat(theta)
+    W2 = W @ W
+    angle = torch.norm(theta)
+    if angle < 1e-5:
+        V = I + 0.5 * W + (1.0 / 6.0) * W2
+    else:
+        V = (
+            I
+            + W * ((1.0 - torch.cos(angle)) / (angle**2))
+            + W2 * ((angle - torch.sin(angle)) / (angle**3))
+        )
+    return V
+
+
+def SE3_exp(tau):
+    dtype = tau.dtype
+    device = tau.device
+
+    rho = tau[:3]
+    theta = tau[3:]
+    R = SO3_exp(theta)
+    t = V(theta) @ rho
+
+    T = torch.eye(4, device=device, dtype=dtype)
+    T[:3, :3] = R
+    T[:3, 3] = t
+    return T
+
 def geom_transform_points(points, transf_matrix):
     P, _ = points.shape
     ones = torch.ones(P, 1, dtype=points.dtype, device=points.device)
@@ -48,6 +118,27 @@ def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
     C2W[:3, 3] = cam_center
     Rt = np.linalg.inv(C2W)
     return np.float32(Rt)
+
+def getWorld2View_torch(R, t):
+    Rt = torch.zeros(4, 4)
+    Rt[:3, :3] = R.t()
+    Rt[:3, 3] = t
+    Rt[3, 3] = 1.0
+    return Rt
+
+def getWorld2View2_torch(R, t, translate=torch.tensor([0.0, 0.0, 0.0]), scale=1.0):
+    Rt = torch.zeros((4, 4), device=R.device)
+    Rt[:3, :3] = R.transpose(0, 1)
+    Rt[:3, 3] = t
+    Rt[3, 3] = 1.0
+
+    translate = translate.to(R.device)
+    C2W = torch.linalg.inv(Rt)
+    cam_center = C2W[:3, 3]
+    cam_center = (cam_center + translate) * scale
+    C2W[:3, 3] = cam_center
+    Rt = torch.linalg.inv(C2W)
+    return Rt
 
 def getProjectionMatrix(znear, zfar, fovX, fovY):
     tanHalfFovY = math.tan((fovY / 2))

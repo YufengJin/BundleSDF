@@ -295,7 +295,99 @@ def transformed_params2depthplussilhouette(params, w2c, transformed_pts):
     }
     return rendervar
 
+def visualize_param_info(params):
+    pcl = o3d.geometry.PointCloud()
+    points = params["means3D"].detach().cpu().numpy()
+    pcl.points = o3d.utility.Vector3dVector(points)
 
+    if "rgb_colors" in params:
+        colors = params["rgb_colors"].detach().cpu().numpy()
+        pcl.colors = o3d.utility.Vector3dVector(colors)
+
+    if "logit_opacities" in params:
+        # Get the color map by name:
+        cm = plt.get_cmap("gist_rainbow")  # purple high, red small
+
+        opacities = params["logit_opacities"].detach().squeeze(1).cpu().numpy()
+        # exp
+        opacities = np.exp(opacities)
+        opa_colors = cm(opacities)
+
+        pcl_opa = o3d.geometry.PointCloud()
+
+        # Set the point cloud data
+        pcl_opa.points = o3d.utility.Vector3dVector(points)
+        pcl_opa.colors = o3d.utility.Vector3dVector(opa_colors[..., :3])
+
+    else:
+        pcl_opa = None
+    
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
+    if pcl_opa is not None:
+        o3d.visualization.draw([world_frame, pcl, pcl_opa])
+    else:
+        o3d.visualization.draw([world_frame, pcl])
+
+def evaluate_batch_pose_error(poses_gt, poses_est):
+    num_poses = poses_est.shape[0]
+    
+    translation_errors = np.zeros(num_poses)
+    rotation_errors = np.zeros(num_poses)
+    
+    for i in range(num_poses):
+        pose_gt = poses_gt[i]
+        pose_est = poses_est[i]
+        
+        # Extract translation vectors
+        translation_gt = pose_gt[:3, 3]
+        translation_est = pose_est[:3, 3]
+        
+        # Extract rotation matrices
+        rotation_gt = pose_gt[:3, :3]
+        rotation_est = pose_est[:3, :3]
+        
+        # Calculate translation error
+        translation_error = np.linalg.norm(translation_gt - translation_est)
+        
+        # Calculate rotation error
+        rotation_error_cos = 0.5 * (np.trace(np.dot(rotation_gt.T, rotation_est)) - 1.0)
+        rotation_error_cos = min(1.0, max(-1.0, rotation_error_cos))  # Ensure value is in valid range for arccos
+        rotation_error_rad = np.arccos(rotation_error_cos)
+        rotation_error_deg = np.degrees(rotation_error_rad)
+        
+        translation_errors[i] = translation_error
+        rotation_errors[i] = rotation_error_deg
+
+    return translation_errors, rotation_errors
+
+def visualize_camera_poses(c2ws):
+    if isinstance(c2ws, torch.Tensor):
+        c2ws = c2ws.detach().cpu().numpy()
+    assert c2ws.shape[1:] == (4, 4) and len(c2ws.shape) == 3
+    # Visualize World Coordinate Frame
+    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.)
+    camFrames = o3d.geometry.TriangleMesh()
+    for c2w in c2ws:
+        cam_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
+        cam_frame.transform(c2w)
+        camFrames += cam_frame
+        
+    o3d.visualization.draw_geometries([world_frame, camFrames])
+
+def visualize_gaussians(points, scale):
+    cm = plt.get_cmap("gist_rainbow")
+    assert points.shape[1] == 3 and points.shape[0] == scale.shape[0]
+
+    pcl = o3d.geometry.PointCloud()
+    pcl.points = o3d.utility.Vector3dVector(points)
+
+    # normalize scale
+    scale = (scale - scale.min()) / (scale.max() - scale.min())
+    colors = cm(scale)
+
+    pcl.colors = o3d.utility.Vector3dVector(colors[..., :3])
+    return pcl
+    
 def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     """
     Function to transform Isotropic Gaussians from world frame to camera frame.
@@ -565,25 +657,3 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres, mapping_iters, 
 
     if wandb_run is not None:
         wandb_run.log({"Average PSNR": avg_psnr, "Average Depth RMSE": avg_rmse, "Average MS-SSIM": avg_ssim, "Average LPIPS": avg_lpips})
-
-    # # Save metric lists as text files
-    # np.savetxt(os.path.join(eval_dir, "psnr.txt"), psnr_list)
-    # np.savetxt(os.path.join(eval_dir, "rmse.txt"), rmse_list)
-    # np.savetxt(os.path.join(eval_dir, "ssim.txt"), ssim_list)
-    # np.savetxt(os.path.join(eval_dir, "lpips.txt"), lpips_list)
-
-    # # Plot PSNR & RMSE as line plots
-    # fig, axs = plt.subplots(1, 2, figsize=(12, 4))
-    # axs[0].plot(np.arange(num_frames), psnr_list)
-    # axs[0].set_title("RGB PSNR")
-    # axs[0].set_xlabel("Time Step")
-    # axs[0].set_ylabel("PSNR")
-    # axs[1].plot(np.arange(num_frames), rmse_list)
-    # axs[1].set_title("Depth RMSE")
-    # axs[1].set_xlabel("Time Step")
-    # axs[1].set_ylabel("RMSE")
-    # fig.suptitle("Average PSNR: {:.2f}, Average Depth RMSE: {:.2f}".format(avg_psnr, avg_rmse), y=1.05, fontsize=16)
-    # plt.savefig(os.path.join(eval_dir, "metrics.png"), bbox_inches='tight')
-    # if wandb_run is not None:
-    #     wandb_run.log({"Eval Metrics": fig})
-    # plt.close()

@@ -20,11 +20,12 @@ import hashlib
 import matplotlib.pyplot as plt
 from importlib.machinery import SourceFileLoader
 from collections import defaultdict
+from tool import *
 
 from datasets.bundlegs_datasets import (load_dataset_config, HO3D_v3Dataset, BOPDataset)
 from utils.common_utils import seed_everything, save_params_ckpt, save_params
 from utils.graphics_utils import rgbd_to_pointcloud
-from gs_runner import GSRunner
+from gs_runner_v2 import GSRunner
 
 import wandb
 wandb_run = wandb.init(
@@ -32,7 +33,7 @@ wandb_run = wandb.init(
     project="BundleGS",
     # Track hyperparameters and run metadata
     settings=wandb.Settings(start_method="fork"),
-    #mode='disabled'
+    mode='disabled'
 )
 
 def preprocess_data(
@@ -66,14 +67,16 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
 
-def fuse_points_from_rgbd(colors, depths, masks, c2ws, Ks):
+def fuse_points_from_rgbd(colors, depths, masks, glc2ws, Ks):
     # create init point cloud
     pcd = o3d.geometry.PointCloud()
-    for (color, depth, mask, pose, K) in zip(colors, depths, masks, c2ws, Ks):
+    for (color, depth, mask, glc2w, K) in zip(colors, depths, masks, glc2ws, Ks):
         mask = mask & (depth > 0.1) & (~np.isnan(depth))
         sub_pcd = rgbd_to_pointcloud(color, depth, K, mask, return_o3d=True)
 
-        sub_pcd.transform(pose)
+        c2w = glc2w.copy()
+        c2w[:3, 1:3] *= -1
+        sub_pcd.transform(c2w)
         pcd += sub_pcd
 
     # remove outliers
@@ -83,9 +86,10 @@ def fuse_points_from_rgbd(colors, depths, masks, c2ws, Ks):
     pcd = pcd.select_by_index(ind)
     return pcd
 
+
 def run_once(config: dict):
     cfg_bundletrack_cfg = os.path.join(_BASE_DIR, config["bundletrack_cfg"])
-    cfg_bundletrack = yaml.load(open(cfg_bundletrack_cfg, 'r'), Loader=yaml.Loader)
+    cfg_bundletrack = yaml.load(open(cfg_bundletrack_cfg, 'r'),)# Loader=yaml.Loader)
 
     out_folder = os.path.join(
         config["workdir"], config["run_name"]
@@ -159,7 +163,7 @@ def run_once(config: dict):
     else:
         checkpoint_time_idx = 0
 
-    first_num_frames = 20
+    first_num_frames = 20 
 
     curr_data = defaultdict(list) 
     # Load data
@@ -246,30 +250,45 @@ def run_once(config: dict):
             # estimate cameran poses
             c2ws = np.linalg.inv(est_poses)
             glc2ws = c2ws.copy()
-            glc2ws[:, :3, 1:3] *= -1 
+            glc2ws[:, :3, 1:3] *= -1                          # from opencv to opengl
 
             # ground truth poses
             gt_c2ws = np.linalg.inv(gt_poses)
             gt_glc2ws = gt_c2ws.copy()
             gt_glc2ws[:, :3, 1:3] *= -1
 
-            colors, depths, masks, poses = preprocess_data(colors, depths, masks, glc2ws)
+            (
+                sc_factor,
+                translation,
+                pcd_real_scale,
+                pcd_normalized,
+            ) = compute_scene_bounds(
+                None,
+                glc2ws,
+                Ks[0],
+                use_mask=True,
+                base_dir=os.path.join(config['workdir'], config['run_name'], 'preprocess'),
+                rgbs=colors,
+                depths=depths,
+                masks=masks,
+                eps=0.01,
+                min_samples=2,
+            )
 
-            pcd = fuse_points_from_rgbd(colors, depths, masks, c2ws, Ks)
-            pcd.transform(est_poses[0])
-
-            world_coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-
-            pcd_gt = fuse_points_from_rgbd(colors, depths, masks, gt_c2ws, Ks)
+            if config.get('sc_factor', None) is None:
+                config['sc_factor'] = sc_factor
             
-            pcd_gt.transform(gt_poses[0])
+            if config.get('translation', None) is None:
+                config['translation'] = translation
+
+            colors, depths, masks, poses = preprocess_data(colors, depths, masks, glc2ws, sc_factor, translation)
+            
+            # dense point cloud
+            #pcd = fuse_points_from_rgbd(colors, depths, masks, poses, Ks)
 
             # pcd to numpy
-            pcl = np.asarray(pcd.points)
-            pcl = np.concatenate([pcl, np.asarray(pcd.colors)], axis=1)
-
-            pcl_gt = np.asarray(pcd_gt.points)
-            pcl_gt = np.concatenate([pcl_gt, np.asarray(pcd_gt.colors)], axis=1)
+            pcl = np.asarray(pcd_normalized.points)
+            pcl = np.concatenate([pcl, np.asarray(pcd_normalized.colors)], axis=1)
 
             gsRunner = GSRunner(
                 config,
@@ -277,18 +296,17 @@ def run_once(config: dict):
                 depths=depths,
                 masks=masks,
                 K=Ks[0],
-                poses=gt_glc2ws,
+                poses=poses,
                 total_num_frames=num_frames,
-                pointcloud=pcl,
+                pointcloud_normalized=pcd_normalized,
                 #pointcloud_gt=pcl_gt,
                 poses_gt=gt_glc2ws.copy(),
                 wandb_run=wandb_run,
-                run_gui=True,
+                run_gui=False,
             )
-
+            1/0
             gsRunner.train()
 
-            1/0
         else:
             colors = curr_data['colors'].copy()
             depths = curr_data['depths'].copy()

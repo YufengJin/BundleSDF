@@ -241,8 +241,6 @@ class NerfRunner:
     models['pose_array'] = pose_array
     self.models = models
 
-
-
   def make_frame_rays(self,frame_id):
     mask = self.masks[frame_id,...,0].copy()
     rays = get_camera_rays_np(self.H, self.W, self.K)   # [self.H, self.W, 3]  We create rays frame-by-frame to save memory

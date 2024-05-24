@@ -40,6 +40,7 @@ from utils.slam_helpers import (
     quat_mult,
     matrix_to_quaternion,
 )
+from utils.gs_helpers import evaluate_batch_pose_error, visualize_camera_poses, visualize_gaussians, visualize_param_info
 from datasets.bundlegs_datasets import relative_transformation, datautils
 from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
 
@@ -48,7 +49,6 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
 # TODO 2. add keyframe selection
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
-DEBUG_LEVEL = 0
 
 def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
     # initialize pointcloud
@@ -96,75 +96,6 @@ def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
 
     vis.destroy_window()
 
-def evaluate_batch_pose_error(poses_gt, poses_est):
-    num_poses = poses_est.shape[0]
-    
-    translation_errors = np.zeros(num_poses)
-    rotation_errors = np.zeros(num_poses)
-    
-    for i in range(num_poses):
-        pose_gt = poses_gt[i]
-        pose_est = poses_est[i]
-        
-        # Extract translation vectors
-        translation_gt = pose_gt[:3, 3]
-        translation_est = pose_est[:3, 3]
-        
-        # Extract rotation matrices
-        rotation_gt = pose_gt[:3, :3]
-        rotation_est = pose_est[:3, :3]
-        
-        # Calculate translation error
-        translation_error = np.linalg.norm(translation_gt - translation_est)
-        
-        # Calculate rotation error
-        rotation_error_cos = 0.5 * (np.trace(np.dot(rotation_gt.T, rotation_est)) - 1.0)
-        rotation_error_cos = min(1.0, max(-1.0, rotation_error_cos))  # Ensure value is in valid range for arccos
-        rotation_error_rad = np.arccos(rotation_error_cos)
-        rotation_error_deg = np.degrees(rotation_error_rad)
-        
-        translation_errors[i] = translation_error
-        rotation_errors[i] = rotation_error_deg
-    
-
-    if DEBUG_LEVEL > 0:
-        print(f"DEBUG: Pose Estimation Evlaution: \nTranslation Error:\n \
-              \tFull Trans Error: {translation_errors} \n \
-              \tMean: {np.mean(translation_errors):.4f}, Variance: {np.var(translation_errors):.4f}  \n \
-              Rotation Error:\n \
-              \tFull Rot Error: {rotation_errors} \n \
-              \tMean: {np.mean(rotation_errors):.4f}, Variance: {np.var(rotation_errors):.4f}") 
-
-    return translation_errors, rotation_errors
-
-def visualize_camera_poses(c2ws):
-    if isinstance(c2ws, torch.Tensor):
-        c2ws = c2ws.detach().cpu().numpy()
-    assert c2ws.shape[1:] == (4, 4) and len(c2ws.shape) == 3
-    # Visualize World Coordinate Frame
-    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=1.)
-    camFrames = o3d.geometry.TriangleMesh()
-    for c2w in c2ws:
-        cam_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.1)
-        cam_frame.transform(c2w)
-        camFrames += cam_frame
-        
-    o3d.visualization.draw_geometries([world_frame, camFrames])
-
-def visualize_gaussians(points, scale):
-    cm = plt.get_cmap("gist_rainbow")
-    assert points.shape[1] == 3 and points.shape[0] == scale.shape[0]
-
-    pcl = o3d.geometry.PointCloud()
-    pcl.points = o3d.utility.Vector3dVector(points)
-
-    # normalize scale
-    scale = (scale - scale.min()) / (scale.max() - scale.min())
-    colors = cm(scale)
-
-    pcl.colors = o3d.utility.Vector3dVector(colors[..., :3])
-    return pcl
-
 def visualize_ellipsoids_gaussians(points, colors, scales, rotations, alpha):
     # TODO
     assert points.shape[1] == 3 and points.shape[0] == colors.shape[0] == scales.shape[0] == rotations.shape[0]
@@ -179,39 +110,6 @@ def visualize_ellipsoids_gaussians(points, colors, scales, rotations, alpha):
         if scale.shape[0] == 1:
             scale = np.tile(scale, 3)
         ellipsoid.scale(scale)
-
-def visualize_param_info(params):
-    pcl = o3d.geometry.PointCloud()
-    points = params["means3D"].detach().cpu().numpy()
-    pcl.points = o3d.utility.Vector3dVector(points)
-
-    if "rgb_colors" in params:
-        colors = params["rgb_colors"].detach().cpu().numpy()
-        pcl.colors = o3d.utility.Vector3dVector(colors)
-
-    if "logit_opacities" in params:
-        # Get the color map by name:
-        cm = plt.get_cmap("gist_rainbow")  # purple high, red small
-
-        opacities = params["logit_opacities"].detach().squeeze(1).cpu().numpy()
-        # exp
-        opacities = np.exp(opacities)
-        opa_colors = cm(opacities)
-
-        pcl_opa = o3d.geometry.PointCloud()
-
-        # Set the point cloud data
-        pcl_opa.points = o3d.utility.Vector3dVector(points)
-        pcl_opa.colors = o3d.utility.Vector3dVector(opa_colors[..., :3])
-
-    else:
-        pcl_opa = None
-    
-    world_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5)
-    if pcl_opa is not None:
-        o3d.visualization.draw([world_frame, pcl, pcl_opa])
-    else:
-        o3d.visualization.draw([world_frame, pcl])
 
 
 def get_img_from_fig(fig, dpi=180):
@@ -497,8 +395,6 @@ def initialize_optimizer_sep(params, lrs_dict, tracking):
     else:
         return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
-EXPERIMENT_WS = "/home/yjin/repos/BundleSDF/experiments/gs"
-
 class GSRunner:
     def __init__(
         self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, pointcloud_gt=None, poses_gt=None, wandb_run=None, run_gui=False,):
@@ -515,10 +411,6 @@ class GSRunner:
 
         self.debug_level = cfg_gs["debug_level"]
         
-        # update debug level global
-        global DEBUG_LEVEL
-        DEBUG_LEVEL = self.debug_level
-
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
 
         self.run_gui = run_gui
@@ -626,6 +518,14 @@ class GSRunner:
 
         # calculate the relative pose error
         translation_errors, rotation_errors = evaluate_batch_pose_error(poses_gt, poses)
+
+        if self.debug_level > 0:
+            print(f"DEBUG: Pose Estimation Evlaution: \nTranslation Error:\n \
+              \tFull Trans Error: {translation_errors} \n \
+              \tMean: {np.mean(translation_errors):.4f}, Variance: {np.var(translation_errors):.4f}  \n \
+              Rotation Error:\n \
+              \tFull Rot Error: {rotation_errors} \n \
+              \tMean: {np.mean(rotation_errors):.4f}, Variance: {np.var(rotation_errors):.4f}") 
 
         if visualize:
             num_poses = poses.shape[0]
@@ -768,7 +668,7 @@ class GSRunner:
         center_pcl = torch.mean(init_pt_cld[:, :3], dim=0)
         radius = torch.norm(init_pt_cld[:, :3] - center_pcl, dim=1).max()
         # Initialize an estimate of scene radius for Gaussian-Splatting Densification, TODO understanding variables scene_radius
-        variables["scene_radius"] = 2.5 * radius 
+        variables["scene_radius"] = 2 * radius 
 
         self.params = params
         self.variables = variables
