@@ -7,7 +7,7 @@ scenes = ["000000", "000001", "000002", "000003", "000004", "000005", "000006", 
 primary_device="cuda:0"
 seed = 0
 use_gui = False
-debug_level= 0 
+debug_level= 2 
 
 scene_name = scenes[0]
 
@@ -41,7 +41,7 @@ map_every = 1
 keyframe_every = 5
 mapping_window_size = 24
 tracking_iters = 80 
-mapping_iters = 1000
+mapping_iters = 80
 
 group_name = "bop"
 run_name = f"{scene_name}_{seed}"
@@ -102,7 +102,7 @@ config = dict(
         percent_dense=0.01,
         densification_interval=100,
         opacity_reset_interval=3000,
-        densify_from_iter=500,
+        densify_from_iter=100,
         densify_until_iter=15_000,
         densify_grad_threshold=0.0002
     ),
@@ -126,7 +126,7 @@ config = dict(
             mapping=dict(
                 im=1.,
                 depth=1.,
-                edge=1.,
+                edge=0.,
                 silhouette=1.
             ),
             tracking=dict(

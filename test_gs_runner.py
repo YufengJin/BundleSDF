@@ -163,7 +163,7 @@ def run_once(config: dict):
     else:
         checkpoint_time_idx = 0
 
-    first_num_frames = 20 
+    first_num_frames = 50
 
     curr_data = defaultdict(list) 
     # Load data
@@ -264,7 +264,7 @@ def run_once(config: dict):
                 pcd_normalized,
             ) = compute_scene_bounds(
                 None,
-                glc2ws,
+                gt_glc2ws,
                 Ks[0],
                 use_mask=True,
                 base_dir=os.path.join(config['workdir'], config['run_name'], 'preprocess'),
@@ -281,7 +281,7 @@ def run_once(config: dict):
             if config.get('translation', None) is None:
                 config['translation'] = translation
 
-            colors, depths, masks, poses = preprocess_data(colors, depths, masks, glc2ws, sc_factor, translation)
+            colors, depths, masks, poses = preprocess_data(colors, depths, masks, gt_glc2ws, sc_factor, translation)
             
             # dense point cloud
             #pcd = fuse_points_from_rgbd(colors, depths, masks, poses, Ks)
@@ -298,7 +298,7 @@ def run_once(config: dict):
                 K=Ks[0],
                 poses=poses,
                 total_num_frames=num_frames,
-                pointcloud_normalized=pcd_normalized,
+                #pointcloud_normalized=pcd_normalized,
                 #pointcloud_gt=pcl_gt,
                 poses_gt=gt_glc2ws.copy(),
                 wandb_run=wandb_run,

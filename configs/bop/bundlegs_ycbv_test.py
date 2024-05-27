@@ -6,7 +6,7 @@ scenes = ["000048", "000049", "000050", "000051", "000052", "000053", "000054", 
 primary_device="cuda:0"
 seed = 0
 use_gui = False
-debug_level= 3 
+debug_level= 2 
 
 scene_name = scenes[2]
 
@@ -88,7 +88,7 @@ config = dict(
         convert_SHs_python = False,
         compute_cov3D_python = False
     ),
-    gaussians_model=dict(
+    gaussians_model = dict(
         sh_degree=3,
         position_lr_init=0.00016,              
         position_lr_final=0.0000016,            
@@ -99,6 +99,11 @@ config = dict(
         scaling_lr=0.005,
         rotation_lr=0.001,
         percent_dense=0.01,
+        densification_interval=100,
+        opacity_reset_interval=3000,
+        densify_from_iter=500,
+        densify_until_iter=15_000,
+        densify_grad_threshold=0.0002
     ),
     train=dict(
         num_epochs=1,

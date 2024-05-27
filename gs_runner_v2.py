@@ -58,6 +58,7 @@ from scene import Camera, GaussianModel
 from utils.gaussian_renderer import render
 from utils.sh_utils import SH2RGB
 from diff_gaussian_rasterization import GaussianRasterizer, GaussianRasterizationSettings
+from utils.slam_helpers import get_depth_and_silhouette
 
 def run_gui_thread(gui_lock, gui_dict):
     num_points = 1000
@@ -154,7 +155,7 @@ class GSRunner:
         image_height, image_width = colors.shape[2], colors.shape[3]
         
         # setup camera params
-        self.bg = torch.tensor([0, 0, 0]).to(self.device).type(self.dtype)
+        self.bg = torch.tensor([0, 0, 0]).to(self.device).type(self.dtype)    # black background
         self.image_height = image_height
         self.image_width = image_width
 
@@ -192,9 +193,10 @@ class GSRunner:
         self.gaussians.create_from_pcd(pcd, self.cfg_gs['sc_factor'])
 
         self.gaussians.training_setup(self.opt)
-        
 
-        self.gaussians_iter = 0 
+        # TODO create sdf funtion 
+
+        self.gaussians_iter = 1
         self.curr_frame_id = 0
 
         self.datas = []
@@ -359,7 +361,7 @@ class GSRunner:
 
         return (colors, depths, masks)
     
-    def get_loss(self, viewpoint, color, depth=None, opacity=None, tracking=True, dssim_weight=0.2):
+    def get_loss(self, viewpoint, color, depth=None, opacity=None, iter=None, tracking=True, dssim_weight=0.2):
         assert viewpoint.color is not None and viewpoint.mask is not None
         if depth is not None:
             assert viewpoint.depth is not None
@@ -426,7 +428,7 @@ class GSRunner:
         loss += loss_weights['im'] * im_loss
 
         # visualize debugging images
-        if self.debug_level > 2:
+        if self.debug_level > 1 and iter % 50 == 0:
             # evaluate gaussian depth rendering
             magnified_diff_depth = torch.abs(viewpoint.depth - depth) * (mask_gt & presence_sil_mask & nan_mask)
             depth_dist = magnified_diff_depth.mean()
@@ -527,7 +529,10 @@ class GSRunner:
                 for j in range(4):
                     ax[i, j].axis("off")
             # Set Title
-            suptitle = f"frame_id: {viewpoint.uid} Training Iteration: {iter}"
+            if tracking:
+                suptitle = f"frame_id: {viewpoint.uid} Tracking Iteration: {iter}"
+            else:
+                suptitle = f"frame_id: {viewpoint.uid} Mapping Iteration: {iter}"
             fig.suptitle(suptitle, fontsize=16)
             # Figure Tight Layout
             fig.tight_layout()
@@ -552,88 +557,98 @@ class GSRunner:
             curr_data = self.datas.pop(0)
             time_idx = curr_data["id"]
             viewpoint = curr_data["viewpoint"]
-            if time_idx > 0:
-                # intialize the camera optimizer
-                opt_params = []
-                opt_params.append(
-                    {
-                        "params": [viewpoint.cam_rot_delta],
-                        "lr": 0.01, 
-                        "name": "rot_{}".format(viewpoint.uid),
-                    }
-                )
-                opt_params.append(
-                    {
-                        "params": [viewpoint.cam_trans_delta],
-                        "lr": 0.001,
-                        "name": "trans_{}".format(viewpoint.uid),
-                    }
-                )
+            # if time_idx > 0:
+            #     # intialize the camera optimizer
+            #     opt_params = []
+            #     opt_params.append(
+            #         {
+            #             "params": [viewpoint.cam_rot_delta],
+            #             "lr": 0.01, 
+            #             "name": "rot_{}".format(viewpoint.uid),
+            #         }
+            #     )
+            #     opt_params.append(
+            #         {
+            #             "params": [viewpoint.cam_trans_delta],
+            #             "lr": 0.001,
+            #             "name": "trans_{}".format(viewpoint.uid),
+            #         }
+            #     )
 
-                pose_optimizer = torch.optim.Adam(opt_params)
+            #     pose_optimizer = torch.optim.Adam(opt_params)
 
-                best_R, best_t = viewpoint.R, viewpoint.T
-                prev_loss = 1e6
-                print(f"INFO: TRACKING STARTED FOR FRAME {time_idx}")
-                for iter in range(self.cfg_gs['train']['tracking_iters']):
-                    render_pkg = render(viewpoint, self.gaussians, self.pipe, self.bg)
-                    image, viewspace_point_tensor, visibility_filter, radii, depth, opacity= render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["depth"], render_pkg["opacity"]
+            #     best_R, best_t = viewpoint.R, viewpoint.T
+            #     prev_loss = 1e6
+            #     print(f"INFO: TRACKING STARTED FOR FRAME {time_idx}")
+            #     for iter in range(self.cfg_gs['train']['tracking_iters']):
+            #         render_pkg = render(viewpoint, self.gaussians, self.pipe, self.bg)
+            #         image, viewspace_point_tensor, visibility_filter, radii, depth, opacity= render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["depth"], render_pkg["opacity"]
                     
-                    loss = self.get_loss(viewpoint, image, depth, opacity, tracking=True)
-                    pose_optimizer.zero_grad()
-                    loss.backward()
+            #         loss = self.get_loss(viewpoint, image, depth, opacity, iter, tracking=True)
+            #         pose_optimizer.zero_grad()
+            #         loss.backward()
                     
-                    if self.run_gui:
-                        gt_image_np = viewpoint.color.detach().cpu().numpy().transpose(1, 2, 0)
-                        image_np    = image.detach().cpu().numpy().transpose(1, 2, 0)
-                        gt_image_np = (gt_image_np * 255).astype(np.uint8)
-                        image_np = (image_np * 255).astype(np.uint8)
-                        images = np.hstack((gt_image_np, image_np))
-                        images = cv2.cvtColor(images, cv2.COLOR_BGR2RGB)
+            #         if self.run_gui:
+            #             gt_image_np = viewpoint.color.detach().cpu().numpy().transpose(1, 2, 0)
+            #             image_np    = image.detach().cpu().numpy().transpose(1, 2, 0)
+            #             gt_image_np = (gt_image_np * 255).astype(np.uint8)
+            #             image_np = (image_np * 255).astype(np.uint8)
+            #             images = np.hstack((gt_image_np, image_np))
+            #             images = cv2.cvtColor(images, cv2.COLOR_BGR2RGB)
 
-                        text = f"Tracking Iteration: {iter} on frame {time_idx} Loss: {loss.item():.6f}"
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale = 1
-                        font_thickness = 2
-                        text_color = (255, 255, 255)  # White color
-                        text_position = (50, 50)
-                        cv2.putText(images, text, text_position, font, font_scale, text_color, font_thickness)
+            #             text = f"Tracking Iteration: {iter} on frame {time_idx} Loss: {loss.item():.6f}"
+            #             font = cv2.FONT_HERSHEY_SIMPLEX
+            #             font_scale = 1
+            #             font_thickness = 2
+            #             text_color = (255, 255, 255)  # White color
+            #             text_position = (50, 50)
+            #             cv2.putText(images, text, text_position, font, font_scale, text_color, font_thickness)
 
-                        xyz = self.gaussians.get_xyz.detach().cpu().numpy()
-                        features = self.gaussians.get_features.detach().cpu().numpy()
-                        rgb = SH2RGB(features)[:, 0, :]
-                        pcl = np.concatenate((xyz, rgb), axis=1)
-                        with self.gui_lock:
-                            self.gui_dict["image"] = images
-                            self.gui_dict["pointcloud"] = pcl
+            #             xyz = self.gaussians.get_xyz.detach().cpu().numpy()
+            #             features = self.gaussians.get_features.detach().cpu().numpy()
+            #             rgb = SH2RGB(features)[:, 0, :]
+            #             pcl = np.concatenate((xyz, rgb), axis=1)
+            #             with self.gui_lock:
+            #                 self.gui_dict["image"] = images
+            #                 self.gui_dict["pointcloud"] = pcl
 
-                    print(f"INFO: TRACKING ITERATION {iter} LOSS: {loss.item()}")
+            #         print(f"INFO: TRACKING ITERATION {iter} LOSS: {loss.item()}")
 
-                    with torch.no_grad():
-                        pose_optimizer.step()
-                        viewpoint.update()
-                        converged = viewpoint.update()
+            #         with torch.no_grad():
+            #             pose_optimizer.step()
+            #             viewpoint.update()
+            #             converged = viewpoint.update()
                         
-                        if loss < prev_loss:
-                            best_R, best_t = viewpoint.R, viewpoint.T
-                            prev_loss = loss
+            #             if loss < prev_loss:
+            #                 best_R, best_t = viewpoint.R, viewpoint.T
+            #                 prev_loss = loss
 
-                        # if converged:
-                        #     break
+            #             # if converged:
+            #             #     break
 
 
             print(f"INFO: MAPPING STARTED FOR FRAME {time_idx}")    
             for iter in range(self.cfg_gs['train']['mapping_iters']):
                 self.gaussians.update_learning_rate(self.gaussians_iter)
+
                 if self.gaussians_iter % 1000 == 0:
                     self.gaussians.oneupSHdegree()
 
                 render_pkg = render(viewpoint, self.gaussians, self.pipe, self.bg)
                 image, viewspace_point_tensor, visibility_filter, radii, depth, opacity= render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["depth"], render_pkg["opacity"]
                 
-                loss = self.get_loss(viewpoint, image, depth, opacity, tracking=False)
+                w2c = viewpoint.world_view_transform.t()
+
+                # hachy way to render depth and silhouette
+                pts_3d = self.gaussians.get_xyz
+                depth_silhouette = get_depth_and_silhouette(pts_3d, w2c)
+
+                render_pkg = render(viewpoint, self.gaussians, self.pipe, self.bg, override_color=depth_silhouette)
+                silhouette = render_pkg["render"]
+
+                loss = self.get_loss(viewpoint, image, depth, silhouette[1], iter, tracking=False)
                 loss.backward()
-                print(f"INFO: MAPPING ITERATION {iter} LOSS: {loss.item()}")
+                #print(f"INFO: MAPPING ITERATION {iter} LOSS: {loss.item()}")
 
                 if self.run_gui:
                     gt_image_np = viewpoint.color.detach().cpu().numpy().transpose(1, 2, 0)
@@ -670,10 +685,10 @@ class GSRunner:
                             size_threshold = 20 if self.gaussians_iter > self.opt.opacity_reset_interval else None
                             self.gaussians.densify_and_prune(self.opt.densify_grad_threshold, 0.005, self.cfg_gs['sc_factor'] , size_threshold)
 
-                        # if self.gaussians_iter % self.opt.opacity_reset_interval == 0 or (self.bg.item() == [1, 1, 1] and self.gaussians_iter == self.opt.densify_from_iter):
-                        #     self.gaussians.reset_opacity()
+                        if self.gaussians_iter % self.opt.opacity_reset_interval == 0 or (all(self.bg == torch.tensor([1, 1, 1]).to(self.device)) and self.gaussians_iter == self.opt.densify_from_iter):
+                            self.gaussians.reset_opacity()
 
-                    # Optimizer step
+                    # Optimizer step, TODO: ends at the end of training
                     if self.gaussians_iter < 30_000:
                         self.gaussians.optimizer.step()
                         self.gaussians.optimizer.zero_grad(set_to_none = True)

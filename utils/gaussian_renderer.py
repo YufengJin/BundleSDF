@@ -78,7 +78,12 @@ def render(
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
     shs = None
-    colors_precomp = None
+
+    if override_color is not None:
+        colors_precomp = override_color
+    else:
+        colors_precomp = None
+
     if colors_precomp is None:
         if pipe.convert_SHs_python:
             shs_view = pc.get_features.transpose(1, 2).view(
@@ -95,6 +100,7 @@ def render(
     else:
         colors_precomp = override_color
 
+    
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     if mask is not None:
         rendered_image, radii, depth, opacity = rasterizer(
