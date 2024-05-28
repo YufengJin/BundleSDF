@@ -36,7 +36,7 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 
 """
 
-target_object_id = 4    
+target_object_id = 1    
 map_every = 1 
 keyframe_every = 5
 mapping_window_size = 24
@@ -109,7 +109,7 @@ config = dict(
     train=dict(
         num_epochs=1,
         batch_size=10,
-        batch_iters=1,
+        batch_iters=1000,
         mapping_iters=mapping_iters, # Mapping Iterations
         tracking_iters=tracking_iters, # Tracking Iterations
         sil_thres=0.9,

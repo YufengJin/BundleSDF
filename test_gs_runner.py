@@ -55,6 +55,7 @@ def preprocess_data(
     rgbs = (rgbs / 255.0).astype(np.float32)
     depths *= sc_factor
     depths = depths[..., None]
+    poses = poses.copy()
     poses[:, :3, 3] += translation
     poses[:, :3, 3] *= sc_factor
     return rgbs, depths, masks, poses
@@ -80,7 +81,7 @@ def fuse_points_from_rgbd(colors, depths, masks, glc2ws, Ks):
         pcd += sub_pcd
 
     # remove outliers
-    pcd = pcd.voxel_down_sample(voxel_size=0.001)
+    pcd = pcd.voxel_down_sample(voxel_size=0.0001)
     cl, ind = pcd.remove_statistical_outlier(nb_neighbors=100,
                                             std_ratio=1.0)
     pcd = pcd.select_by_index(ind)
@@ -264,7 +265,7 @@ def run_once(config: dict):
                 pcd_normalized,
             ) = compute_scene_bounds(
                 None,
-                gt_glc2ws,
+                glc2ws,
                 Ks[0],
                 use_mask=True,
                 base_dir=os.path.join(config['workdir'], config['run_name'], 'preprocess'),
@@ -283,13 +284,13 @@ def run_once(config: dict):
 
             colors, depths, masks, poses = preprocess_data(colors, depths, masks, gt_glc2ws, sc_factor, translation)
             
-            # dense point cloud
-            #pcd = fuse_points_from_rgbd(colors, depths, masks, poses, Ks)
+            # dense point cloud, ground truth pose
+            poses_gt = gt_glc2ws.copy()
+            poses_gt[:, :3, 3] += translation
+            poses_gt[:, :3, 3] *= sc_factor
 
-            # pcd to numpy
-            pcl = np.asarray(pcd_normalized.points)
-            pcl = np.concatenate([pcl, np.asarray(pcd_normalized.colors)], axis=1)
-
+            pcd_dense = fuse_points_from_rgbd(colors, depths, masks, poses_gt, Ks)
+            
             gsRunner = GSRunner(
                 config,
                 rgbs=colors,
@@ -298,13 +299,13 @@ def run_once(config: dict):
                 K=Ks[0],
                 poses=poses,
                 total_num_frames=num_frames,
-                #pointcloud_normalized=pcd_normalized,
+                #pointcloud_normalized=pcd_dense,
                 #pointcloud_gt=pcl_gt,
                 poses_gt=gt_glc2ws.copy(),
                 wandb_run=wandb_run,
                 run_gui=True,
             )
-            gsRunner.train_v1()
+            gsRunner.train_v2()
             1/0
 
         else:

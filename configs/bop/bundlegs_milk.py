@@ -99,14 +99,14 @@ config = dict(
         percent_dense=0.01,
         densification_interval=100,
         opacity_reset_interval=3000,
-        densify_from_iter=500,
+        densify_from_iter=100,
         densify_until_iter=15_000,
         densify_grad_threshold=0.0002
     ),
     train=dict(
         num_epochs=1,
         batch_size=10,
-        batch_iters=1,
+        batch_iters=1000,
         mapping_iters=mapping_iters, # Mapping Iterations
         tracking_iters=tracking_iters, # Tracking Iterations
         sil_thres=0.9,
