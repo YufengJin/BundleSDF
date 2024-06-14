@@ -15,7 +15,7 @@ sys.path.append(f'{code_dir}/BundleTrack/scripts')
 from data_reader import *
 
 
-def benchmark_one_video(method,video_dir):
+def benchmark_one_video(args, method,video_dir):
   print('\n',video_dir)
   reader = Ho3dReader(video_dir)
   video_name = reader.get_video_name()
@@ -142,9 +142,9 @@ def benchmark_one_video(method,video_dir):
 
 if __name__=='__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--video_dirs', type=str, default="/mnt/9a72c439-d0a7-45e8-8d20-d7a235d02763/DATASET/HO3D_v3/evaluation/SM1")
-  parser.add_argument('--out_dir', type=str, default=f"/home/bowen/debug/ho3d_ours")
-  parser.add_argument('--log_dir', type=str, default=f"/home/bowen/debug/")
+  parser.add_argument('--video_dirs', type=str, default="/home/datasets/HO3D_v3/evaluation/SM1")
+  parser.add_argument('--out_dir', type=str, default=f"/home/yjin/repos/BundleSDF/debug/ho3d_out")
+  parser.add_argument('--log_dir', type=str, default=f"/home/yjin/repos/BundleSDF/debug")
   args = parser.parse_args()
 
   method = 'ours'
@@ -153,9 +153,8 @@ if __name__=='__main__':
 
   video_dirs = args.video_dirs.split(',')
   out_data = {}
-  args = []
   for video_dir in video_dirs:
-    out = benchmark_one_video(method, video_dir)
+    out = benchmark_one_video(args, method, video_dir)
     out_data.update(out)
 
   out = {}

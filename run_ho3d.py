@@ -98,7 +98,7 @@ def run_one_video_global_nerf(video_dir,out_dir):
 
 
 def run_all():
-  video_dirs = sorted(glob.glob('/mnt/9a72c439-d0a7-45e8-8d20-d7a235d02763/DATASET/HO3D_v3/evaluation/*'))
+  video_dirs = sorted(glob.glob('/home/datasets/HO3D_v3/evaluation/*'))
 
   for video_dir in video_dirs:
     run_one_video(video_dir, out_dir=args.out_dir)
@@ -106,8 +106,8 @@ def run_all():
 
 if __name__=="__main__":
   parser = argparse.ArgumentParser()
-  parser.add_argument('--video_dirs', type=str, default="/mnt/9a72c439-d0a7-45e8-8d20-d7a235d02763/DATASET/HO3D_v3/evaluation/MPM10")
-  parser.add_argument('--out_dir', type=str, default="/home/bowen/debug/ho3d_ours")
+  parser.add_argument('--video_dirs', type=str, default="/home/datasets/HO3D_v3/evaluation/SM1")
+  parser.add_argument('--out_dir', type=str, default="/home/yjin/repos/BundleSDF/debug/ho3d_out")
   parser.add_argument('--use_segmenter', type=int, default=0)
   parser.add_argument('--use_gui', type=int, default=0)
   args = parser.parse_args()
