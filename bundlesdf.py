@@ -353,12 +353,14 @@ class BundleSdf:
     logging.info(f"frame_pairs: {len(frame_pairs)}")
     is_match_ref = len(frame_pairs)==1 and frame_pairs[0][0]._ref_frame_id==frame_pairs[0][1]._id and self.bundler._newframe==frame_pairs[0][0]
 
+    # tfs: projective matrix
     imgs, tfs, query_pairs = self.bundler._fm.getProcessedImagePairs(frame_pairs)
     imgs = np.array([np.array(img) for img in imgs])
 
     if len(query_pairs)==0:
       return
 
+    # shape of corres (1, N, 5), where N is the number of matches, 5 is x1, y1, x2, y2, score
     corres = self.loftr.predict(rgbAs=imgs[::2], rgbBs=imgs[1::2])
     for i_pair in range(len(query_pairs)):
       cur_corres = corres[i_pair][:,:4]
@@ -431,6 +433,7 @@ class BundleSdf:
 
     min_match_with_ref = self.cfg_track["feature_corres"]["min_match_with_ref"]
 
+    # frame: current frame, ref_frame: previous frame
     self.find_corres([(frame, ref_frame)])
     matches = self.bundler._fm._matches[(frame, ref_frame)]
 
