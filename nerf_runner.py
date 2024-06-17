@@ -682,7 +682,7 @@ class NerfRunner:
     frame_ids = batch[:,self.ray_frame_id_slice]
 
     ray_ids = self.data_loader.batch_ray_ids.to(batch.device)
-￼   rgb, extras = self.render(rays=batch, ray_ids=ray_ids, frame_ids=frame_ids,depth=target_d,lindisp=False,perturb=True,raw_noise_std=self.cfg['raw_noise_std'], near=batch[:,self.ray_near_slice], far=batch[:,self.ray_far_slice], get_normals=False)
+    rgb, extras = self.render(rays=batch, ray_ids=ray_ids, frame_ids=frame_ids,depth=target_d,lindisp=False,perturb=True,raw_noise_std=self.cfg['raw_noise_std'], near=batch[:,self.ray_near_slice], far=batch[:,self.ray_far_slice], get_normals=False)
 
     valid_samples = extras['valid_samples']   #(N_ray,N_samples)
     z_vals = extras['z_vals']  # [N_rand, N_samples + N_importance]
