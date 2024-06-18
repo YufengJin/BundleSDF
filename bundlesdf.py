@@ -18,6 +18,8 @@ from BundleTrack.scripts.data_reader import *
 from Utils import *
 from loftr_wrapper import LoftrRunner
 import multiprocessing,threading
+from tracker import ICPTracker
+from fusion import TSDFVolumeTorch
 try:
   multiprocessing.set_start_method('spawn')
 except:
@@ -58,7 +60,6 @@ def run_gui(gui_dict, gui_lock):
     time.sleep(0.03)
 
   dpg.destroy_context()
-
 
 
 def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, start_nerf_keyframes, use_gui, gui_lock, gui_dict, debug_dir):
@@ -215,27 +216,88 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
       occ_masks = None
 
     if cnt_nerf==0:
-      logging.info(f"First nerf run, create Runner, latest nerf frame {frame_id}")
+      #logging.info(f"First nerf run, create Runner, latest nerf frame {frame_id}")
       nerf = NerfRunner(cfg_nerf,rgbs,depths=depths,masks=masks,normal_maps=normal_maps,occ_masks=occ_masks,poses=poses,K=K,build_octree_pcd=pcd_normalized)
+      # intialize tsdf volume
+      cfg_tsdf ={
+        "near": 0.1,
+        "far": 4.0,
+        "vol_bounds": [-1., 1., -1., 1., -1., 1.],
+        "voxel_size": 0.01,
+        "n_pyramids": 3,
+        "n_iters": [6, 3, 3],
+        "dampings": [1.0e-4, 1.0e-4, 1.0e-2],
+        "n_steps": 192,
+        "margin": 3,
+        "fuse_color": True,
+        "device": "cuda:0",
+      } 
+      tsdf_volume = TSDFVolumeTorch(cfg_tsdf)
+      icp_tracker = ICPTracker(cfg_tsdf, tsdf_volume)
+
+      curr_pose = poses[0] # first frame pose gt
+      H, W = rgbs[0].shape[:2]
+      for idx, (color, depth, mask) in enumerate(zip(rgbs, depths, masks)):
+        # get masked depth
+        valid_depth = (depth > 0.) & mask.astype(bool)
+        depth0 = depth * valid_depth.astype(float)
+
+        # convert numpy to torch
+        depth0 = torch.from_numpy(depth0).float().to(cfg_tsdf["device"])
+        color = torch.from_numpy(color).float().to(cfg_tsdf["device"])
+        if idx > 0:
+          depth1, color1, vertex01, normal1, mask1 = tsdf_volume.render_model(curr_pose, K, H, W, near=cfg_tsdf["near"], far=cfg_tsdf["far"], n_samples=cfg_tsdf["n_steps"])
+          # not sdf loss but icp loss
+          T10 = icp_tracker(depth0, depth1, K)  # transform from 0 to 1
+          curr_pose = curr_pose @ T10
+           
+        tsdf_volume.integrate(depth0, 
+                              K, 
+                              curr_pose, 
+                              obs_weight=1.,
+                              color_img=color)
+
+
     else:
-      if cfg_nerf['continual']:
-        logging.info(f"add_new_frames, latest nerf frame {frame_id}")
-        nerf.add_new_frames(rgbs,depths,masks,normal_maps,poses,occ_masks=occ_masks, new_pcd=pcd_normalized, reuse_weights=False)
-      else:
-        nerf = NerfRunner(cfg_nerf,rgbs,depths=depths,masks=masks,normal_maps=normal_maps,occ_masks=occ_masks,poses=poses,K=K,build_octree_pcd=pcd_normalized)
+      # get masked depth
+      valid_depth = (depth > 0.) & mask.astype(bool)
+      depth0 = depth * valid_depth.astype(float)
+      depth1, color1, vertex01, normal1, mask1 = tsdf_volume.render_model(curr_pose, K, H, W, near=cfg_tsdf["near"], far=cfg_tsdf["far"], n_samples=cfg_tsdf["n_steps"])
+      # not sdf loss but icp loss
+      T10 = icp_tracker(depth, depth1, K)  # transform from 0 to 1
+      curr_pose = curr_pose @ T10
 
-    logging.info(f"Start training, latest nerf frame {frame_id}")
-    nerf.train()
-    logging.info(f"Training done, latest nerf frame {frame_id}")
+      tsdf_volume.integrate(depth0, 
+                            K, 
+                            curr_pose, 
+                            obs_weight=1.,
+                            color_img=color)
 
-    optimized_cvcam_in_obs,offset = get_optimized_poses_in_real_world(poses,nerf.models['pose_array'],cfg_nerf['sc_factor'],cfg_nerf['translation'])
+     
+    
+      #if cfg_nerf['continual']:
+      #  logging.info(f"add_new_frames, latest nerf frame {frame_id}")
+      #  nerf.add_new_frames(rgbs,depths,masks,normal_maps,poses,occ_masks=occ_masks, new_pcd=pcd_normalized, reuse_weights=False)
+      #else:
+      #  nerf = NerfRunner(cfg_nerf,rgbs,depths=depths,masks=masks,normal_maps=normal_maps,occ_masks=occ_masks,poses=poses,K=K,build_octree_pcd=pcd_normalized)
 
+      # 
+
+    #logging.info(f"Start training, latest nerf frame {frame_id}")
+    #nerf.train()
+    #logging.info(f"Training done, latest nerf frame {frame_id}")
+
+
+    #optimized_cvcam_in_obs,offset = get_optimized_poses_in_real_world(poses,nerf.models['pose_array'],cfg_nerf['sc_factor'],cfg_nerf['translation'])
+
+    verts, faces, norms, colors = tsdf_volume.get_mesh()
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_normals=norms, vertex_colors=colors)
     logging.info("Getting mesh")
-    mesh = nerf.extract_mesh(isolevel=0,voxel_size=cfg_nerf['mesh_resolution'])
-    mesh = mesh_to_real_world(mesh, pose_offset=offset, translation=nerf.cfg['translation'], sc_factor=nerf.cfg['sc_factor'])
+    #mesh = nerf.extract_mesh(isolevel=0,voxel_size=cfg_nerf['mesh_resolution'])
+    #mesh = mesh_to_real_world(mesh, pose_offset=offset, translation=nerf.cfg['translation'], sc_factor=nerf.cfg['sc_factor'])
 
     with lock:
-      p_dict['optimized_cvcam_in_obs'] = optimized_cvcam_in_obs
+      #p_dict['optimized_cvcam_in_obs'] = optimized_cvcam_in_obs
       p_dict['running'] = False
       # p_dict['nerf_last'] = nerf    #!NOTE not pickable
       p_dict['mesh'] = mesh
@@ -255,7 +317,7 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
             tmp[k] = tmp[k].tolist()
         yaml.dump(tmp,ff)
       shutil.copy(f"{out_dir}/config.yml",f"{cfg_nerf['save_dir']}/")
-      np.savetxt(f"{debug_dir}/{frame_id}/poses_after_nerf.txt",np.array(optimized_cvcam_in_obs).reshape(-1,4))
+      #np.savetxt(f"{debug_dir}/{frame_id}/poses_after_nerf.txt",np.array(optimized_cvcam_in_obs).reshape(-1,4))
       mesh.export(f"{cfg_nerf['save_dir']}/mesh_real_world.obj")
       os.system(f"rm -rf {cfg_nerf['save_dir']}/step_*_mesh_real_world.obj {cfg_nerf['save_dir']}/*frame*ray*.ply && mv {cfg_nerf['save_dir']}/*  {out_dir}/")
 
