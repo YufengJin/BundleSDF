@@ -19,6 +19,7 @@ import math,glob,re,copy
 from transformations import *
 from scipy.spatial import cKDTree
 from collections import OrderedDict
+import pdb
 import ruamel.yaml
 yaml = ruamel.yaml.YAML()
 try:
@@ -67,6 +68,19 @@ def set_logging_format():
 
 set_logging_format()
 
+
+class ForkedPdb(pdb.Pdb):
+    """A Pdb subclass that may be used
+    from a forked multiprocessing child
+
+    """
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin
 
 def set_seed(random_seed):
   import torch,random

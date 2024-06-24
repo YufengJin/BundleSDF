@@ -236,18 +236,19 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
       icp_tracker = ICPTracker(cfg_tsdf, tsdf_volume)
 
       curr_pose = poses[0] # first frame pose gt
+      curr_pose[:3, 1:3] *= -1 # from opengl to cv
       H, W = rgbs[0].shape[:2]
       for idx, (color, depth, mask) in enumerate(zip(rgbs, depths, masks)):
-        # get masked depth
-        valid_depth = (depth > 0.) & mask.astype(bool)
-        depth0 = depth * valid_depth.astype(float)
+        # filter out bad depth, 
+        depth[depth == depth.max()] = 0.
 
         # convert numpy to torch
-        depth0 = torch.from_numpy(depth0).float().to(cfg_tsdf["device"])
+        depth0 = torch.from_numpy(depth).float().to(cfg_tsdf["device"])[..., 0]
         color = torch.from_numpy(color).float().to(cfg_tsdf["device"])
         if idx > 0:
           depth1, color1, vertex01, normal1, mask1 = tsdf_volume.render_model(curr_pose, K, H, W, near=cfg_tsdf["near"], far=cfg_tsdf["far"], n_samples=cfg_tsdf["n_steps"])
           # not sdf loss but icp loss
+          print(f"torch type of depth: ", depth0.type(), depth1.type(), depth0.device, depth1.device)
           T10 = icp_tracker(depth0, depth1, K)  # transform from 0 to 1
           curr_pose = curr_pose @ T10
            
