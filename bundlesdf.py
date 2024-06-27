@@ -353,7 +353,7 @@ class BundleSdf:
     logging.info(f"frame_pairs: {len(frame_pairs)}")
     is_match_ref = len(frame_pairs)==1 and frame_pairs[0][0]._ref_frame_id==frame_pairs[0][1]._id and self.bundler._newframe==frame_pairs[0][0]
 
-    # tfs: projective matrix
+    # tfs: projective matrix, query_pairs: [my_cpp.Frame, my_cpp.Frame]
     imgs, tfs, query_pairs = self.bundler._fm.getProcessedImagePairs(frame_pairs)
     imgs = np.array([np.array(img) for img in imgs])
 
@@ -391,12 +391,14 @@ class BundleSdf:
 
 
   def process_new_frame(self, frame):
+    # main function to bundle adjustment
     logging.info(f"process frame {frame._id_str}")
 
     self.bundler._newframe = frame
     os.makedirs(self.debug_dir, exist_ok=True)
 
     if frame._id>0:
+      # reference frame is the last frame
       ref_frame = self.bundler._frames[list(self.bundler._frames.keys())[-1]]
       frame._ref_frame_id = ref_frame._id
       frame._pose_in_model = ref_frame._pose_in_model
@@ -407,7 +409,7 @@ class BundleSdf:
     if frame._id==0 and np.abs(np.array(frame._pose_in_model)-np.eye(4)).max()<=1e-4:
       frame.setNewInitCoordinate()
 
-
+    # remove frame if mask not big enough 
     n_fg = (np.array(frame._fg_mask)>0).sum()
     if n_fg<100:
       logging.info(f"Frame {frame._id_str} cloud is empty, marked FAIL, roi={n_fg}")
@@ -415,6 +417,7 @@ class BundleSdf:
       self.bundler.forgetFrame(frame)
       return
 
+    # denoise depth image
     if self.cfg_track["depth_processing"]["denoise_cloud"]:
       frame.pointCloudDenoise()
 

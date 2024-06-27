@@ -11,7 +11,6 @@ import os, sys, time,torch,pickle,trimesh,itertools,pdb,zipfile,datetime,imageio
 import open3d as o3d
 from uuid import uuid4
 import cv2
-import pdb
 from PIL import Image
 import numpy as np
 import multiprocessing as mp
@@ -86,7 +85,7 @@ class ForkedPdb(pdb.Pdb):
     _stdin = sys.stdin
     try:
         sys.stdin = open('/dev/stdin')
-        pdb.pdb.interaction(self, *args, **kwargs)
+        pdb.Pdb.interaction(self, *args, **kwargs)
     finally:
         sys.stdin = _stdin
 

@@ -45,7 +45,7 @@ def compute_near_far_and_filter_rays(cam_in_world,rays,cfg):
   '''
   D = rays.shape[-1]
   rays = rays.reshape(-1,D)
-  dirs_unit = rays[:,:3]/np.linalg.norm(rays[:,:3],axis=-1).reshape(-1,1)
+  dirs_unit = rays[:,:3]/np.linalg.norm(rays[:,:3],axis=-1).reshape(-1,1) # normalized ray direction
   dirs = (cam_in_world[:3,:3]@rays[:,:3].T).T
   origins = (cam_in_world@to_homo(np.zeros(dirs.shape)).T).T[:,:3]
   bounds = np.array(cfg['bounding_box']).reshape(2,3)
@@ -254,8 +254,8 @@ class NerfRunner:
     invalid_depth = ((self.depths[frame_id,...,0]<self.cfg['near']*self.cfg['sc_factor']) | (self.depths[frame_id,...,0]>self.cfg['far']*self.cfg['sc_factor'])) & (mask>0)
     ray_types[invalid_depth] = 1
     rays = np.concatenate((rays,ray_types), axis=-1)
-    self.ray_dir_slice = [0,1,2]
-    self.ray_rgb_slice = [3,4,5]
+    self.ray_dir_slice = [0,1,2]  # ray direction
+    self.ray_rgb_slice = [3,4,5]  # rgb
     self.ray_depth_slice = 6
     self.ray_mask_slice = 7
     if self.normal_maps is not None:
@@ -287,8 +287,8 @@ class NerfRunner:
       mask[invalid_depth] = 0
 
     vs,us = np.where(mask>0)
-    cur_rays = rays[vs,us].reshape(-1,n)
-    cur_rays = cur_rays[cur_rays[:,self.ray_type_slice]==0]
+    cur_rays = rays[vs,us].reshape(-1,n)      # ray inside mask, remove background
+    cur_rays = cur_rays[cur_rays[:,self.ray_type_slice]==0] # remove bad rays
     cur_rays = compute_near_far_and_filter_rays(self.poses[frame_id],cur_rays,self.cfg)
     if self.normal_maps is not None:
       self.ray_near_slice = 13
@@ -370,6 +370,7 @@ class NerfRunner:
     self.poses = poses.copy()
     self.c2w_array = torch.tensor(poses, dtype=torch.float).cuda()
 
+    # TODO understand octree ray tracing
     if self.cfg['use_octree']:
       pcd = new_pcd.voxel_down_sample(0.005)
       self.build_octree_pts = np.asarray(pcd.points).copy()
@@ -587,7 +588,7 @@ class NerfRunner:
       cur_rays = self.rays[frame_ids==img_i].cuda()
     gt_depth = cur_rays[:,self.ray_depth_slice]
     gt_rgb = cur_rays[:,self.ray_rgb_slice].cpu()
-    ray_type = cur_rays[:,self.ray_type_slice].data.cpu().numpy()
+    ray_type = cur_rays[:,self.ray_type_slice].data.cpu().numpy() # 0 is good; 1 is invalid depth (uncertain)
     near = cur_rays[:,self.ray_near_slice]
     far = cur_rays[:,self.ray_far_slice]
     ray_ids = torch.arange(len(self.rays), device=cur_rays.device)[frame_ids==img_i].long()
@@ -675,6 +676,7 @@ class NerfRunner:
 
 
   def train_loop(self,batch):
+    # training data saved in rays, color and depth correspond to the rays (ray_id, rgb, depth, mask)
     target_s = batch[:, self.ray_rgb_slice]    # Color (N,3)
     target_d = batch[:, self.ray_depth_slice]    # Normalized scale (N)
 
@@ -684,6 +686,7 @@ class NerfRunner:
     ray_ids = self.data_loader.batch_ray_ids.to(batch.device)
     rgb, extras = self.render(rays=batch, ray_ids=ray_ids, frame_ids=frame_ids,depth=target_d,lindisp=False,perturb=True,raw_noise_std=self.cfg['raw_noise_std'], near=batch[:,self.ray_near_slice], far=batch[:,self.ray_far_slice], get_normals=False)
 
+    #  z_vals sorted in ascending order (N_ray, N_samples) sdf (N_ray, N_samples) 
     valid_samples = extras['valid_samples']   #(N_ray,N_samples)
     z_vals = extras['z_vals']  # [N_rand, N_samples + N_importance]
     sdf = extras['raw'][..., -1]
@@ -693,6 +696,8 @@ class NerfRunner:
 
     ray_type = batch[:,self.ray_type_slice].reshape(-1)
     ray_weights = torch.ones((N_rays), device=rgb.device, dtype=torch.float32)
+    
+    # bigger weight for the first frame
     ray_weights[(frame_ids==0).view(-1)] = self.cfg['first_frame_weight']
     ray_weights = ray_weights*valid_rays.view(-1)
     sample_weights = ray_weights.view(N_rays,1).expand(-1,N_samples) * valid_samples
@@ -709,6 +714,7 @@ class NerfRunner:
     depth_loss = torch.tensor(0)
     depth_loss0 = torch.tensor(0)
     if self.cfg['depth_weight']>0:
+      # not be used
       signs = sdf[:, 1:] * sdf[:, :-1]
       mask = signs<0
       inds = torch.argmax(mask.float(), axis=1)
@@ -761,6 +767,7 @@ class NerfRunner:
     if self.global_step%10==0 and self.global_step>0:
       self.schedule_lr()
 
+    # logging
     if self.global_step%self.cfg['i_weights']==0 and self.global_step>0:
       self.save_weights(out_file=os.path.join(self.cfg['save_dir'], f'model_latest.pth'), models=self.models)
 
@@ -1041,8 +1048,8 @@ class NerfRunner:
         sample.
     """
     N_rays = ray_batch.shape[0]
-    rays_d = ray_batch[:,self.ray_dir_slice]
-    rays_o = torch.zeros_like(rays_d)
+    rays_d = ray_batch[:,self.ray_dir_slice]   # ray directions
+    rays_o = torch.zeros_like(rays_d)       # ray origins
     viewdirs = rays_d/rays_d.norm(dim=-1,keepdim=True)
 
     frame_ids = ray_batch[:,self.ray_frame_id_slice].long()
@@ -1051,12 +1058,12 @@ class NerfRunner:
     if self.models['pose_array'] is not None:
       tf = self.models['pose_array'].get_matrices(frame_ids)@tf
 
-
+    # Transform rays origin and directions to world space
     rays_o_w = transform_pts(rays_o,tf)
     viewdirs_w = (tf[:,:3,:3]@viewdirs[:,None].permute(0,2,1))[:,:3,0]
     voxel_size = self.cfg['octree_raytracing_voxel_size']*self.cfg['sc_factor']
     level = int(np.floor(np.log2(2.0/voxel_size)))
-    near,far,_,depths_in_out = self.octree_m.ray_trace(rays_o_w,viewdirs_w,level=level,debug=0)
+    near,far,_,depths_in_out = self.octree_m.ray_trace(rays_o_w,viewdirs_w,level=level,debug=0)             # octree ray tracing, get near, far, and depth in and out of rays
     z_vals,_ = self.sample_rays_uniform_occupied_voxels(ray_ids=ray_ids,rays_d=viewdirs,depths_in_out=depths_in_out,lindisp=lindisp,perturb=perturb, depths=depth, N_samples=self.cfg['N_samples'])
 
     if self.cfg['N_samples_around_depth']>0 and depth is not None:      #!NOTE only fine when depths are all valid
@@ -1090,8 +1097,8 @@ class NerfRunner:
       rgb_map_0 = rgb_map
 
       for iter in range(self.cfg['N_importance_iter']):
-        z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])
-        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], self.cfg['N_importance'], det=(perturb==0.))
+        z_vals_mid = .5 * (z_vals[...,1:] + z_vals[...,:-1])   # get the middle point of each two points
+        z_samples = sample_pdf(z_vals_mid, weights[...,1:-1], self.cfg['N_importance'], det=(perturb==0.)) # sample points around the sdf
         z_samples = z_samples.detach()
         valid_samples_importance = torch.ones(z_samples.shape, dtype=torch.bool).to(z_vals.device)
         valid_samples_importance[torch.all(valid_samples==0, dim=-1).reshape(-1)] = 0
@@ -1160,7 +1167,7 @@ class NerfRunner:
       return weights / (weights.sum(dim=-1,keepdim=True) + 1e-10)
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
-    weights = sdf2weights(raw[..., 3])
+    weights = sdf2weights(raw[..., 3]) # sdf
 
     weights[valid_samples==0] = 0
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
@@ -1239,9 +1246,9 @@ class NerfRunner:
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
 
     tf_flat = tf[:,None].expand(-1,N_sample,-1,-1).reshape(-1,4,4)
-    inputs_flat = transform_pts(inputs_flat, tf_flat)
+    inputs_flat = transform_pts(inputs_flat, tf_flat) # transform points to canonical space
 
-    valid_samples = valid_samples.bool() & (torch.abs(inputs_flat)<=1).all(dim=-1).view(N_ray,N_sample).bool()
+    valid_samples = valid_samples.bool() & (torch.abs(inputs_flat)<=1).all(dim=-1).view(N_ray,N_sample).bool() # only valid samples are within the canonical space (-1, 1)
 
     embedded = torch.zeros((inputs_flat.shape[0],self.models['embed_fn'].out_dim), device=inputs_flat.device)
     if valid_samples is None:
@@ -1251,6 +1258,7 @@ class NerfRunner:
       if inputs_flat.requires_grad==False:
         inputs_flat.requires_grad = True
 
+    # automatic mixed precision
     with torch.cuda.amp.autocast(enabled=self.cfg['amp']):
       if self.cfg['i_embed'] in [3]:
         embedded[valid_samples.reshape(-1)], valid_samples_embed = self.models['embed_fn'](inputs_flat[valid_samples.reshape(-1)])
@@ -1297,6 +1305,7 @@ class NerfRunner:
     if get_normals:
       sdf = outputs[...,-1]
       d_output = torch.zeros(sdf.shape, device=sdf.device)
+      # computes gradients of tensors
       normals = torch.autograd.grad(outputs=sdf,inputs=inputs_flat,grad_outputs=d_output,create_graph=False,retain_graph=True,only_inputs=True,allow_unused=True)[0]
       normals = normals.reshape(N_ray,N_sample,3)
 
