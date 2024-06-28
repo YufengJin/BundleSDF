@@ -1,13 +1,12 @@
 import torch
 import torch.nn as nn
 from icp import ICP
-
+from Utils import *
 
 class ICPTracker(nn.Module):
 
     def __init__(self,
                  args,
-                 device,
                  ):
 
         super(ICPTracker, self).__init__()
@@ -17,7 +16,7 @@ class ICPTracker(nn.Module):
         self.dampings = args["dampings"]
         self.construct_image_pyramids = ImagePyramids(self.scales, pool='avg')
         self.construct_depth_pyramids = ImagePyramids(self.scales, pool='max')
-        self.device = device
+        self.device = args["device"]
         # initialize tracker at different levels
         self.icp_solvers = []
         for i in range(self.n_pyr):

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from Utils import *
 
 
 # forward ICP
@@ -283,6 +284,8 @@ def invH(H):
     """
     # GPU is much slower for matrix inverse when the size is small (compare to CPU)
     # works (50x faster) than inversing the dense matrix in GPU
+
+    H += torch.eye(H.shape[-1]).to(H) * 1e-6
     if H.is_cuda:
         invH = torch.inverse(H.cpu()).cuda()
     else:

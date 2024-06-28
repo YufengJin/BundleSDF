@@ -233,11 +233,15 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
         "device": "cuda:0",
       } 
       tsdf_volume = TSDFVolumeTorch(cfg_tsdf)
-      icp_tracker = ICPTracker(cfg_tsdf, tsdf_volume)
+      icp_tracker = ICPTracker(cfg_tsdf)
 
       curr_pose = poses[0] # first frame pose gt
       curr_pose[:3, 1:3] *= -1 # from opengl to cv
       H, W = rgbs[0].shape[:2]
+
+      # convert numpy to torch
+      K = torch.from_numpy(K).float().to(cfg_tsdf["device"])
+      curr_pose = torch.from_numpy(curr_pose).float().to(cfg_tsdf["device"])
       for idx, (color, depth, mask) in enumerate(zip(rgbs, depths, masks)):
         # filter out bad depth, 
         depth[depth == depth.max()] = 0.
@@ -248,7 +252,6 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
         if idx > 0:
           depth1, color1, vertex01, normal1, mask1 = tsdf_volume.render_model(curr_pose, K, H, W, near=cfg_tsdf["near"], far=cfg_tsdf["far"], n_samples=cfg_tsdf["n_steps"])
           # not sdf loss but icp loss
-          print(f"torch type of depth: ", depth0.type(), depth1.type(), depth0.device, depth1.device)
           T10 = icp_tracker(depth0, depth1, K)  # transform from 0 to 1
           curr_pose = curr_pose @ T10
            
@@ -260,12 +263,23 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
 
 
     else:
+      curr_pose = poses[-1] 
+      curr_pose[:3, 1:3] *= -1 # from opengl to cv
+
+      H, W = rgbs[0].shape[:2]
+
+      # convert numpy to torch
+      K = torch.from_numpy(K).float().to(cfg_tsdf["device"])
+      curr_pose = torch.from_numpy(curr_pose).float().to(cfg_tsdf["device"])
       # get masked depth
-      valid_depth = (depth > 0.) & mask.astype(bool)
-      depth0 = depth * valid_depth.astype(float)
+      depth[depth == depth.max()] = 0.
+
+      depth0 = torch.from_numpy(depth).float().to(cfg_tsdf["device"])[..., 0]
+      if not isinstance(color, torch.Tensor):
+        color = torch.from_numpy(color).float().to(cfg_tsdf["device"])
+
       depth1, color1, vertex01, normal1, mask1 = tsdf_volume.render_model(curr_pose, K, H, W, near=cfg_tsdf["near"], far=cfg_tsdf["far"], n_samples=cfg_tsdf["n_steps"])
       # not sdf loss but icp loss
-      T10 = icp_tracker(depth, depth1, K)  # transform from 0 to 1
       curr_pose = curr_pose @ T10
 
       tsdf_volume.integrate(depth0, 
@@ -292,6 +306,9 @@ def run_nerf(p_dict, kf_to_nerf_list, lock, cfg_nerf, translation, sc_factor, st
     #optimized_cvcam_in_obs,offset = get_optimized_poses_in_real_world(poses,nerf.models['pose_array'],cfg_nerf['sc_factor'],cfg_nerf['translation'])
 
     verts, faces, norms, colors = tsdf_volume.get_mesh()
+
+    # rescale verts
+    verts = verts / cfg_nerf['sc_factor']
     mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_normals=norms, vertex_colors=colors)
     logging.info("Getting mesh")
     #mesh = nerf.extract_mesh(isolevel=0,voxel_size=cfg_nerf['mesh_resolution'])
