@@ -4,7 +4,7 @@ from os.path import join as p_join
 scenes = ["AP10", "AP12", "AP14", "MPM11", "MPM13", "SB11", "SM1",
           "AP11", "AP13", "MPM10", "MPM12", "MPM14", "SB13"]
 
-primary_device="cuda:0"
+device="cuda:0"
 seed = 0
 use_gui = False
 debug_level= 2 
@@ -26,7 +26,7 @@ config = dict(
     run_name=run_name,
     debug_level=debug_level, 
     seed=seed,
-    primary_device=primary_device,
+    device=device,
     use_segmenter=False,
     use_gui=use_gui,
     map_every=map_every, # Mapping every nth frame

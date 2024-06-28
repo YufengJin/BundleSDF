@@ -143,12 +143,15 @@ def run_once(config: dict):
         # Get the hexadecimal representation of the hash
         id_str = hash_object.hexdigest()[:8]
 
+        id_str += f"{time_idx:06d}"
+
         # set initial pose identity
         pose_in_model = np.eye(4)
 
-        # TODO how to put gt pose into tracker
         tracker.run(color, depth, K, id_str, mask=mask, occ_mask=None, pose_in_model=pose_in_model)
     tracker.on_finish()
+
+    #TODO pose evaluation
 
 
     

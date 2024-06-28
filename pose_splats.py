@@ -8,7 +8,7 @@
 
 
 from Utils import *
-from gs_runner import *
+from splats_runner import *
 from tool import *
 
 code_dir = os.path.dirname(os.path.realpath(__file__))
@@ -64,7 +64,6 @@ def run_open3d(gui_dict, gui_lock):
 def run_gui(gui_dict, gui_lock):
 
     #TODO visualize point cloud live in open3d
-    
     print("GUI started")
     with gui_lock:
         gui = BundleSdfGui(img_height=200)
@@ -163,14 +162,15 @@ def run_6dsplats(
         @rgbs: np array (N,H,W,3)
         @depths: (N,H,W)
         @masks: (N,H,W)
-        @normal_maps: (N,H,W,3)
         @poses: (N,4,4)
         '''
+        # TODO BAD DPETH VALUE or 0, add to utils
         depths[depths<0.1] = 0.
 
-        rgbs[masks==0] = [0, 0, 0]
-        depths[masks==0] = 0.
-        masks = masks[...,None]
+        if masks is not None:
+            rgbs[masks==0] = [0, 0, 0]
+            depths[masks==0] = 0.
+            masks = masks[...,None]
 
         rgbs = (rgbs / 255.0).astype(np.float32)
         depths *= sc_factor
@@ -179,16 +179,14 @@ def run_6dsplats(
         poses[:, :3, 3] *= sc_factor
         return rgbs,depths,masks,poses
     
-    vox_res = 0.01
+    vox_res = cfg_gs["vox_res"] 
     total_num_frames = cfg_gs["data"]["num_frames"]
     start_gs_keyframes = cfg_gs["start_gs_keyframes"]
     splats_num_frames = 0
     cnt_splats = -1
     rgbs_all = []
     depths_all = []
-    normal_maps_all = []
     masks_all = []
-    occ_masks_all = []
     prev_pcd_real_scale = None
     tf_normalize = None
 
@@ -222,10 +220,6 @@ def run_6dsplats(
                         rgbs.append(f["rgb"])
                         depths.append(f["depth"])
                         masks.append(f["mask"])
-                        if f["normal_map"] is not None:
-                            normal_maps.append(f["normal_map"])
-                        if f["occ_mask"] is not None:
-                            occ_masks.append(f["occ_mask"])
                     K = p_dict["K"]
                     splats_num_frames += len(rgbs)
                     p_dict["splats_num_frames"] = splats_num_frames
@@ -247,165 +241,76 @@ def run_6dsplats(
         depths_all += list(depths)
         masks_all += list(masks)
 
-        if normal_maps is not None:
-            normal_maps_all += list(normal_maps)
-        if occ_masks is not None:
-            occ_masks_all += list(occ_masks)
-
-        out_dir = f"{debug_dir}/{frame_id}/splats"
+        out_dir = f"{debug_dir}/{frame_id}_splats_{cnt_splats}"
         logging.info(f"out_dir: {out_dir}")
         os.makedirs(out_dir, exist_ok=True)
         os.system(f"rm -rf {out_dir} && mkdir -p {out_dir}")
 
+        # update save dir for 6dsplats debug
+        cfg_gs["save_dir"] = out_dir
+
         glcam_in_obs = cam_in_obs @ glcam_in_cvcam
 
-        rgbs, depths, masks, poses = preprocess_data(
-                 np.array(rgbs),
-                 np.array(depths),
-                 np.array(masks),
-                 poses=glcam_in_obs)
-        
-        #ForkedPdb().set_trace()
-        # if cfg_nerf["continual"]:
-        #     if cnt_splats == 0:
-        #         if translation is None:
-        #             # translation purpose of sc_factor and translation is to map the point cloud to the range of -1 to 1
-        #             (
-        #                 sc_factor,
-        #                 translation,
-        #                 pcd_real_scale,
-        #                 pcd_normalized,
-        #             ) = compute_scene_bounds(
-        #                 None,
-        #                 glcam_in_obs,
-        #                 K,
-        #                 use_mask=True,
-        #                 base_dir=cfg_nerf["save_dir"],
-        #                 rgbs=np.array(rgbs_all),
-        #                 depths=np.array(depths_all),
-        #                 masks=np.array(masks_all),
-        #                 eps=cfg_nerf["dbscan_eps"],
-        #                 min_samples=cfg_nerf["dbscan_eps_min_samples"],
-        #             )
-        #             sc_factor *= 0.7  # Ensure whole object within bound
-        #             cfg_nerf["sc_factor"] = float(sc_factor)
-        #             cfg_nerf["translation"] = translation
-        #             tf_normalize = np.eye(4)
-        #             tf_normalize[:3, 3] = translation
-        #             tf1 = np.eye(4)
-        #             tf1[:3, :3] *= sc_factor
-        #             tf_normalize = tf1 @ tf_normalize
-        #         pcd_all = pcd_real_scale
+        if cfg_gs["continual"]:
+            if cnt_splats == 0:
+                sc_factor,translation,pcd_real_scale, pcd_normalized = compute_scene_bounds(None,glcam_in_obs,K,use_mask=True,base_dir=out_dir,rgbs=np.array(rgbs_all),depths=np.array(depths_all),masks=np.array(masks_all), eps=cfg_gs['dbscan']['eps'], min_samples=cfg_gs['dbscan']['eps_min_samples'], debug=SPDLOG)
+                sc_factor *= 0.7      # Ensure whole object within bound
+                cfg_gs['sc_factor'] = float(sc_factor)
+                cfg_gs['translation'] = translation
+                tf_normalize = np.eye(4)
+                tf_normalize[:3,3] = translation
+                tf1 = np.eye(4)
+                tf1[:3,:3] *= sc_factor
+                tf_normalize = tf1@tf_normalize
 
-        #     else:
-        #         pcd_all = prev_pcd_real_scale
-        #         for i in range(len(rgbs)):
-        #             pts, colors = compute_scene_bounds_worker(
-        #                 None,
-        #                 K,
-        #                 glcam_in_obs[len(glcam_in_obs) - len(rgbs) + i],
-        #                 use_mask=True,
-        #                 rgb=rgbs[i],
-        #                 depth=depths[i],
-        #                 mask=masks[i],
-        #             )
-        #             pcd_all += toOpen3dCloud(pts, colors)
-        #         pcd_all = pcd_all.voxel_down_sample(vox_res)
-        #         _, keep_mask = find_biggest_cluster(
-        #             np.asarray(pcd_all.points),
-        #             eps=cfg_nerf["dbscan_eps"],
-        #             min_samples=cfg_nerf["dbscan_eps_min_samples"],
-        #         )
-        #         keep_ids = np.arange(len(np.asarray(pcd_all.points)))[keep_mask]
-        #         pcd_all = pcd_all.select_by_index(keep_ids)
+                pcd_all = pcd_real_scale
 
-        #         ########## Clear memory
-        #         rgbs_all = []
-        #         depths_all = []
-        #         normal_maps_all = []
-        #         masks_all = []
-        #         occ_masks_all = []
+            else:
+                pcd_all = prev_pcd_real_scale
 
-        #     pcd_normalized = copy.deepcopy(pcd_all)
-        #     pcd_normalized.transform(tf_normalize)
-        #     if normal_maps is not None and len(normal_maps) > 0:
-        #         normal_maps = np.array(normal_maps)
-        #     else:
-        #         normal_maps = None
-        #     rgbs, depths, masks, normal_maps, poses = preprocess_data(
-        #         np.array(rgbs),
-        #         np.array(depths),
-        #         np.array(masks),
-        #         normal_maps=normal_maps,
-        #         poses=glcam_in_obs,
-        #         sc_factor=cfg_nerf["sc_factor"],
-        #         translation=cfg_nerf["translation"],
-        #     )
+                for i in range(len(rgbs)):
+                    pts, colors = compute_scene_bounds_worker(None,K,glcam_in_obs[len(glcam_in_obs)-len(rgbs)+i],use_mask=True,rgb=rgbs[i],depth=depths[i],mask=masks[i])
+                    pcd_all += toOpen3dCloud(pts, colors)
+                pcd_all = pcd_all.voxel_down_sample(vox_res)
 
-        # else:
-        #     logging.info(f"compute_scene_bounds, latest nerf frame {frame_id}")
-        #     (
-        #         sc_factor,
-        #         translation,
-        #         pcd_real_scale,
-        #         pcd_normalized,
-        #     ) = compute_scene_bounds(
-        #         None,
-        #         glcam_in_obs,
-        #         K,
-        #         use_mask=True,
-        #         base_dir=cfg_nerf["save_dir"],
-        #         rgbs=np.array(rgbs_all),
-        #         depths=np.array(depths_all),
-        #         masks=np.array(masks_all),
-        #         eps=cfg_nerf["dbscan_eps"],
-        #         min_samples=cfg_nerf["dbscan_eps_min_samples"],
-        #     )
+                # save naive pcd_all  
+                if SPDLOG >= 2:
+                    o3d.io.write_point_cloud(f"{out_dir}/naive_fusion.ply",pcd_all)
 
-        #     cfg_nerf["sc_factor"] = float(sc_factor)
-        #     cfg_nerf["translation"] = translation
+                _,keep_mask = find_biggest_cluster(np.asarray(pcd_all.points), eps=cfg_gs['dbscan']['eps'], min_samples=cfg_gs['dbscan']['eps_min_samples']) 
+                keep_ids = np.arange(len(np.asarray(pcd_all.points)))[keep_mask]
+                pcd_all = pcd_all.select_by_index(keep_ids)
+                # save biggest cluster pcd_all
+                if SPDLOG >= 2:
+                    o3d.io.write_point_cloud(f"{out_dir}/naive_fusion_biggest_cluster.ply",pcd_all)
 
-        #     if normal_maps_all is not None and len(normal_maps_all) > 0:
-        #         normal_maps = np.array(normal_maps_all)
-        #     else:
-        #         normal_maps = None
+                ########## Clear memory
+                rgbs_all = []
+                depths_all = []
+                masks_all = []
 
-        #     logging.info(f"preprocess_data, latest nerf frame {frame_id}")
-        #     rgbs, depths, masks, normal_maps, poses = preprocess_data(
-        #         np.array(rgbs_all),
-        #         np.array(depths_all),
-        #         np.array(masks_all),
-        #         normal_maps=normal_maps,
-        #         poses=glcam_in_obs,
-        #         sc_factor=cfg_nerf["sc_factor"],
-        #         translation=cfg_nerf["translation"],
-        #     )
+            pcd_normalized = copy.deepcopy(pcd_all)
+            pcd_normalized.transform(tf_normalize)
+            rgbs,depths,masks,poses = preprocess_data(np.array(rgbs),np.array(depths),np.array(masks),poses=glcam_in_obs,sc_factor=cfg_gs['sc_factor'],translation=cfg_gs['translation'])
 
-        # # cfg_nerf['sampled_frame_ids'] = np.arange(len(rgbs_all))
+        else:
+            logging.info(f"compute_scene_bounds, latest splats frame {frame_id}")
+            sc_factor,translation,pcd_real_scale, pcd_normalized = compute_scene_bounds(None,glcam_in_obs,K,use_mask=True,base_dir=out_dir,rgbs=np.array(rgbs_all),depths=np.array(depths_all),masks=np.array(masks_all), eps=cfg_gs['dbscan']['eps'], min_samples=cfg_gs['dbscan']['eps_min_samples'])
 
-        # if SPDLOG >= 2:
-        #     np.savetxt(
-        #         f"{cfg_nerf['save_dir']}/trainval_poses.txt",
-        #         glcam_in_obs.reshape(-1, 4),
-        #     )
-        #     np.savetxt(
-        #         f"{debug_dir}/{frame_id}/poses_before_nerf.txt",
-        #         np.array(cam_in_obs).reshape(-1, 4),
-        #     )
+            cfg_gs['sc_factor'] = float(sc_factor)
+            cfg_gs['translation'] = translation
 
-        # if len(occ_masks_all) > 0:
-        #     if cfg_nerf["continual"]:
-        #         occ_masks = np.array(occ_masks)
-        #     else:
-        #         occ_masks = np.array(occ_masks_all)
-        # else:
-        #     occ_masks = None
+            logging.info(f"preprocess_data, latest latest frame {frame_id}")
+            rgbs,depths,masks,poses = preprocess_data(np.array(rgbs_all),np.array(depths_all),np.array(masks_all),poses=glcam_in_obs,sc_factor=cfg_gs['sc_factor'],translation=cfg_gs['translation'])
 
-        
+        if SPDLOG>=2:
+            np.savetxt(f"{out_dir}/trainval_poses.txt",glcam_in_obs.reshape(-1,4))
+            np.savetxt(f"{out_dir}/poses_before_6dsplats.txt",np.array(cam_in_obs).reshape(-1,4))
 
+        # visualize point cloud and camera poses
         if cnt_splats == 0:
-            logging.info(f"First nerf run, create Runner, latest nerf frame {frame_id}")
-            gs_runner = GSRunner(
+            logging.info(f"First 6dsplats run, latest splats frame {frame_id}")
+            gs_runner = SplatsRunner(
                          cfg_gs,
                          rgbs=rgbs,
                          depths=depths,
@@ -413,79 +318,70 @@ def run_6dsplats(
                          K=K,
                          poses=poses,
                          total_num_frames=total_num_frames,
+                         pcd_normalized=pcd_normalized,
                      )
 
         else:
-            gs_runner.add_new_frames(
-                rgbs,
-                depths,
-                masks,
-                poses,
-            )
+            if cfg_gs["continual"]:
+                logging.info(f"Add new frames, latest splats frame {frame_id}")
+                gs_runner.add_new_frames(
+                    rgbs,
+                    depths,
+                    masks,
+                    poses,
+                )
+            else:
+                logging.info(f"Reinitialize 6dsplats, latest splats frame {frame_id}")
+                gs_runner = SplatsRunner(
+                        cfg_gs,
+                        rgbs=rgbs,
+                        depths=depths,
+                        masks=masks,
+                        K=K,
+                        poses=poses,
+                        total_num_frames=total_num_frames,
+                        pcd_normalized=pcd_normalized,
+                    )
 
-        logging.info(f"Start training, latest nerf frame {frame_id}")
-        gs_runner.train_once()
-        logging.info(f"Training done, latest nerf frame {frame_id}")
-
-        optimized_cvcam_in_obs = gs_runner.get_optimized_cam_poses()
-        optimized_cvcam_in_obs[:,:3, 1:3] *= -1
-
-        translation_errors, rotation_errors = evaluate_batch_pose_error(
-            poses,
-            optimized_cvcam_in_obs,
-        )
         
-        logging.info(f"camera pose updated. \n translation_errors: {translation_errors} \n rotation_errors: {rotation_errors}")
-        #ForkedPdb().set_trace()
-        #optimized_cvcam_in_obs, offset = get_optimized_poses_in_real_world(
-        #    poses,
-        #    nerf.models["pose_array"],
-        #    cfg_nerf["sc_factor"],
-        #    cfg_nerf["translation"],
-        #)
+        logging.info(f"Start GSRunner Training")
+        gs_runner.train()
+        logging.info(f"GSRunner Training Done")
 
-        #logging.info("Getting mesh")
-        #mesh = nerf.extract_mesh(isolevel=0, voxel_size=cfg_nerf["mesh_resolution"])
-        #mesh = mesh_to_real_world(
-        #    mesh,
-        #    pose_offset=offset,
-        #    translation=nerf.cfg["translation"],
-        #    sc_factor=nerf.cfg["sc_factor"],
-        #)
-        pointcloud = gs_runner.get_xyz_rgb_params()
-        #ForkedPdb().set_trace()
+        # TODO get optimized poses
 
+        # TODO get mesh and splats
+
+        # update optimized poses and mesh and splats for gui
         with lock:
-            #if splats_num_frames > 30:
-            #    p_dict["optimized_cvcam_in_obs"] = optimized_cvcam_in_obs
+            #p_dict["optimized_cvcam_in_obs"] = optimized_cvcam_in_obs
             p_dict["running"] = False
-            # p_dict['nerf_last'] = nerf    #!NOTE not pickable
-            p_dict["pointcloud"] = pointcloud
 
-        logging.info(f"nerf done at frame {frame_id}")
+        logging.info(f"6dsplats done at frame {frame_id}")
 
-        # TODO initialize gaussian from pointcloud
-        #if cfg_nerf["continual"]:
-        #    prev_pcd_real_scale = pcd_all.voxel_down_sample(vox_res)
+        # TODO update pcd_all after splats training 
+        if cfg_gs["continual"]:
+            prev_pcd_real_scale = pcd_all.voxel_down_sample(vox_res)
 
         ####### Log
-        if SPDLOG >= 2:
-            os.system(f"cp -r {cfg_nerf['save_dir']}/image_step_*.png  {out_dir}/")
-            with open(f"{out_dir}/config.yml", "w") as ff:
-                tmp = copy.deepcopy(cfg_nerf)
-                for k in tmp.keys():
-                    if isinstance(tmp[k], np.ndarray):
-                        tmp[k] = tmp[k].tolist()
-                yaml.dump(tmp, ff)
-            shutil.copy(f"{out_dir}/config.yml", f"{cfg_nerf['save_dir']}/")
-            np.savetxt(
-                f"{debug_dir}/{frame_id}/poses_after_nerf.txt",
-                np.array(optimized_cvcam_in_obs).reshape(-1, 4),
-            )
-            mesh.export(f"{cfg_nerf['save_dir']}/mesh_real_world.obj")
-            os.system(
-                f"rm -rf {cfg_nerf['save_dir']}/step_*_mesh_real_world.obj {cfg_nerf['save_dir']}/*frame*ray*.ply && mv {cfg_nerf['save_dir']}/*  {out_dir}/"
-            )
+        # TODO save optimized poses, mesh, splats
+        # if SPDLOG >= 2:
+        #     os.system(f"cp -r {cfg_nerf['out_dir']}/image_step_*.png  {out_dir}/")
+        #     with open(f"{out_dir}/config.yml", "w") as ff:
+        #         tmp = copy.deepcopy(cfg_nerf)
+        #         for k in tmp.keys():
+        #             if isinstance(tmp[k], np.ndarray):
+        #                 tmp[k] = tmp[k].tolist()
+        #         yaml.dump(tmp, ff)
+        #     shutil.copy(f"{out_dir}/config.yml", f"{cfg_nerf['out_dir']}/")
+        #     np.savetxt(
+        #         f"{debug_dir}/{frame_id}/poses_after_nerf.txt",
+        #         np.array(optimized_cvcam_in_obs).reshape(-1, 4),
+        #     )
+        #     mesh.export(f"{cfg_nerf['out_dir']}/mesh_real_world.obj")
+        #     os.system(
+        #         f"rm -rf {cfg_nerf['out_dir']}/step_*_mesh_real_world.obj {cfg_nerf['out_dir']}/*frame*ray*.ply && mv {cfg_nerf['out_dir']}/*  {out_dir}/"
+        #     )
 
 
 class PoseSplats:

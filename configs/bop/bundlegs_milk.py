@@ -3,9 +3,9 @@ from os.path import join as p_join
 
 # TODO clean unused params
 # TODO seperate static and dynamic params, dynamic params could be updated on the top
-primary_device="cuda:0"
+device="cuda:0"
 seed = 0
-use_gui = True 
+use_gui = False 
 debug_level= 2 
 
 scene_name = '000000'
@@ -29,9 +29,18 @@ config = dict(
     start_gs_keyframes=start_gs_keyframes,
     debug_level=debug_level, 
     seed=seed,
-    primary_device=primary_device,
+    device=device,
     use_segmenter=False,
+    continual=True,    # Continual Learning scale factor and translation
     use_gui=use_gui,
+    
+    # octree
+    use_octree=True, # Use Octree
+    octree_smallest_voxel_size=0.02, # Smallest Voxel Size for Octree
+    octree_raytracing_voxel_size=0.02,
+    octree_dilate_size=0.02, 
+
+    down_scale_ratio=2, # Downscale Ratio for RGB and Depth
     map_every=map_every, # Mapping every nth frame
     keyframe_every=keyframe_every, # Keyframe every nth frame
     mapping_window_size=mapping_window_size, # Mapping window size
@@ -48,6 +57,17 @@ config = dict(
     checkpoint_interval=100, # Checkpoint Interval
     use_wandb=False,
     add_new_gaussians=False, # add new gaussians during training         
+    vox_res=0.01, # Voxel Resolution for DBSCAN
+    gaussians=dict(
+        rgb2sh=False, # Convert RGB to SH
+        init_pts_noise=0.02, # Initial Gaussian Noise
+        distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
+
+    ),
+    dbscan=dict(
+        eps=0.06,
+        eps_min_samples=1,
+    ),
     add_gaussian_dict=dict( # Needs to be updated based on the number of mapping iterations
         every_iter=100,
         sil_thres=0.8,

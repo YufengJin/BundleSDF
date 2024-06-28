@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -15,10 +15,12 @@ import numpy as np
 import open3d as o3d
 from typing import NamedTuple
 
+
 class BasicPointCloud(NamedTuple):
-    points : np.array
-    colors : np.array
-    normals : np.array
+    points: np.array
+    colors: np.array
+    normals: np.array
+
 
 def geom_transform_points(points, transf_matrix):
     P, _ = points.shape
@@ -29,6 +31,7 @@ def geom_transform_points(points, transf_matrix):
     denom = points_out[..., 3:] + 0.0000001
     return (points_out[..., :3] / denom).squeeze(dim=0)
 
+
 def getWorld2View(R, t):
     Rt = np.zeros((4, 4))
     Rt[:3, :3] = R.transpose()
@@ -36,7 +39,8 @@ def getWorld2View(R, t):
     Rt[3, 3] = 1.0
     return np.float32(Rt)
 
-def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
+
+def getWorld2View2(R, t, translate=np.array([0.0, 0.0, 0.0]), scale=1.0):
     Rt = np.zeros((4, 4))
     Rt[:3, :3] = R.transpose()
     Rt[:3, 3] = t
@@ -48,6 +52,7 @@ def getWorld2View2(R, t, translate=np.array([.0, .0, .0]), scale=1.0):
     C2W[:3, 3] = cam_center
     Rt = np.linalg.inv(C2W)
     return np.float32(Rt)
+
 
 def getProjectionMatrix(znear, zfar, fovX, fovY):
     tanHalfFovY = math.tan((fovY / 2))
@@ -71,17 +76,20 @@ def getProjectionMatrix(znear, zfar, fovX, fovY):
     P[2, 3] = -(zfar * znear) / (zfar - znear)
     return P
 
+
 def fov2focal(fov, pixels):
     return pixels / (2 * math.tan(fov / 2))
 
+
 def focal2fov(focal, pixels):
-    return 2*math.atan(pixels/(2*focal))
+    return 2 * math.atan(pixels / (2 * focal))
+
 
 def rgbd_to_pointcloud(rgb_image, depth_image, K, mask=None, return_o3d=False):
     # rgb must be numpy and float32
     if isinstance(rgb_image, np.ndarray) and rgb_image.dtype == np.uint8:
         rgb_image = rgb_image.astype(np.float32) / 255.0
-    
+
     fx = K[0][0]
     fy = K[1][1]
     cx = K[0][2]
@@ -100,7 +108,7 @@ def rgbd_to_pointcloud(rgb_image, depth_image, K, mask=None, return_o3d=False):
     points = np.stack((x, y, z), axis=-1).reshape(-1, 3)
 
     # Associate colors with the point cloud
-    colors = rgb_image.reshape(-1, 3) #.astype(np.float32)          
+    colors = rgb_image.reshape(-1, 3)  # .astype(np.float32)
 
     if mask is not None:
         mask = mask.reshape(-1).astype(bool)
@@ -114,13 +122,14 @@ def rgbd_to_pointcloud(rgb_image, depth_image, K, mask=None, return_o3d=False):
         pcd.points = o3d.utility.Vector3dVector(points)
         pcd.colors = o3d.utility.Vector3dVector(colors)
         return pcd
-    return pcl 
+    return pcl
+
 
 def display_inlier_outlier(cloud, ind):
-        inlier_cloud = cloud.select_by_index(ind)
-        outlier_cloud = cloud.select_by_index(ind, invert=True)
-    
-        print("Showing outliers (red) and inliers (gray): ")
-        outlier_cloud.paint_uniform_color([1, 0, 0])
-        inlier_cloud.paint_uniform_color([0.8, 0.8, 0.8])
-        o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud])
+    inlier_cloud = cloud.select_by_index(ind)
+    outlier_cloud = cloud.select_by_index(ind, invert=True)
+
+    print("Showing outliers (red) and inliers (gray): ")
+    outlier_cloud.paint_uniform_color([1, 0, 0])
+    inlier_cloud.paint_uniform_color([0.8, 0.8, 0.8])
+    o3d.visualization.draw_geometries([inlier_cloud, outlier_cloud])

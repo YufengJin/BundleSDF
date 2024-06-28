@@ -4,7 +4,7 @@ from os.path import join as p_join
 # scenes  from 000000 to 000049
 scenes = ["000000", "000001", "000002", "000003", "000004", "000005", "000006", "000007", "000008", "000009", "000010", "000011", "000012", "000013", "000014", "000015", "000016", "000017", "000018", "000019", "000020", "000021", "000022", "000023", "000024", "000025", "000026", "000027", "000028", "000029", "000030", "000031", "000032", "000033", "000034", "000035", "000036", "000037", "000038", "000039", "000040", "000041", "000042", "000043", "000044", "000045", "000046", "000047", "000048", "000049"]
 
-primary_device="cuda:0"
+device="cuda:0"
 seed = 0
 use_gui = False
 debug_level= 3 # 0: No Debug, 1: Only Text Info, 2: Save Debug Images, 3: visualize gaussian, 4: Save gaussians ply
@@ -52,7 +52,7 @@ config = dict(
     run_name=run_name,
     debug_level=debug_level, 
     seed=seed,
-    primary_device=primary_device,
+    device=device,
     use_segmenter=False,
     use_gui=use_gui,
     map_every=map_every, # Mapping every nth frame

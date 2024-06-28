@@ -284,7 +284,6 @@ def run_once(config: dict):
 
             pcl_random = np.concatenate([pts, cols], axis=1)
 
-
             gsRunner = GSRunner(
                 config,
                 rgbs=colors,

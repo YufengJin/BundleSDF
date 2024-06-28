@@ -64,7 +64,7 @@ def compute_scene_bounds_worker(color_file,K,glcam_in_world,use_mask,rgb=None,de
   return np.asarray(pcd.points).copy(), np.asarray(pcd.colors).copy()
 
 
-def compute_scene_bounds(color_files,glcam_in_worlds,K,use_mask=True,base_dir=None,rgbs=None,depths=None,masks=None,cluster=True, translation_cvcam=None, sc_factor=None, eps=0.06, min_samples=1):
+def compute_scene_bounds(color_files,glcam_in_worlds,K,use_mask=True,base_dir=None,rgbs=None,depths=None,masks=None,cluster=True, translation_cvcam=None, sc_factor=None, eps=0.06, min_samples=1, debug=0):
   assert color_files is None or rgbs is None
 
   if base_dir is None:
@@ -94,7 +94,8 @@ def compute_scene_bounds(color_files,glcam_in_worlds,K,use_mask=True,base_dir=No
 
   logging.info(f"merge pcd")
 
-  o3d.io.write_point_cloud(f'{base_dir}/naive_fusion.ply',pcd)
+  if debug>=2:
+    o3d.io.write_point_cloud(f'{base_dir}/naive_fusion.ply',pcd)
   pts = np.asarray(pcd.points).copy()
 
   def make_tf(translation_cvcam, sc_factor):
@@ -115,18 +116,21 @@ def compute_scene_bounds(color_files,glcam_in_worlds,K,use_mask=True,base_dir=No
     tmp_pts = np.asarray(tmp.points)
     keep_mask = (np.abs(tmp_pts)<1).all(axis=-1)
 
-  logging.info(f"compute_translation_scales done")
+  logging.info(f"compute_translation_scales done. translation_cvcam={translation_cvcam}, sc_factor={sc_factor}")
 
   pcd = toOpen3dCloud(pts[keep_mask],np.asarray(pcd.colors)[keep_mask])
-  o3d.io.write_point_cloud(f"{base_dir}/naive_fusion_biggest_cluster.ply",pcd)
+  if debug>=2:
+    o3d.io.write_point_cloud(f"{base_dir}/naive_fusion_biggest_cluster.ply",pcd)
+
   pcd_real_scale = copy.deepcopy(pcd)
-  print(f'translation_cvcam={translation_cvcam}, sc_factor={sc_factor}')
-  with open(f'{base_dir}/normalization.yml','w') as ff:
-    tmp = {
-      'translation_cvcam':translation_cvcam.tolist(),
-      'sc_factor':float(sc_factor),
-    }
-    yaml.dump(tmp,ff)
+
+  if debug>=2:
+    with open(f'{base_dir}/normalization.yml','w') as ff:
+      tmp = {
+        'translation_cvcam':translation_cvcam.tolist(),
+        'sc_factor':float(sc_factor),
+      }
+      yaml.dump(tmp,ff)
 
   pcd.transform(tf)
   return sc_factor, translation_cvcam, pcd_real_scale, pcd

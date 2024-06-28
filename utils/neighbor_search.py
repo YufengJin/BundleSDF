@@ -21,13 +21,13 @@ def torch_3d_knn(pts, num_knn, method="l2"):
     index.add(pts)
     distances, indices = index.search(pts, num_knn)
     return distances, indices
-    
+
 
 def calculate_neighbors(params, variables, time_idx, num_knn=20):
     if time_idx is None:
-        pts = params['means3D'].detach()
+        pts = params["means3D"].detach()
     else:
-        pts = params['means3D'][:, :, time_idx].detach()
+        pts = params["means3D"][:, :, time_idx].detach()
     neighbor_dist, neighbor_indices = torch_3d_knn(pts.contiguous(), num_knn)
     neighbor_weight = torch.exp(-2000 * torch.square(neighbor_dist))
     variables["neighbor_indices"] = neighbor_indices.long().contiguous()

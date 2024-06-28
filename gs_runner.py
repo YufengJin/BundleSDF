@@ -48,7 +48,6 @@ from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 # TODO 1. instead of updating camera pose and mapping iteratively, update camera pose and mapping at the same time
 # TODO 2. add keyframe selection
 # TODO 3. evaluate the error of camera pose optimization on gt_pose
-DEBUG_LEVEL = 0
 
 def run_gui_thread(gui_lock, gui_dict, inital_pointcloud):
     # initialize pointcloud
@@ -127,15 +126,6 @@ def evaluate_batch_pose_error(poses_gt, poses_est):
         translation_errors[i] = translation_error
         rotation_errors[i] = rotation_error_deg
     
-
-    if DEBUG_LEVEL > 0:
-        print(f"DEBUG: Pose Estimation Evlaution: \nTranslation Error:\n \
-              \tFull Trans Error: {translation_errors} \n \
-              \tMean: {np.mean(translation_errors):.4f}, Variance: {np.var(translation_errors):.4f}  \n \
-              Rotation Error:\n \
-              \tFull Rot Error: {rotation_errors} \n \
-              \tMean: {np.mean(rotation_errors):.4f}, Variance: {np.var(rotation_errors):.4f}") 
-
     return translation_errors, rotation_errors
 
 def visualize_camera_poses(c2ws):
@@ -498,44 +488,40 @@ def initialize_optimizer_sep(params, lrs_dict, tracking):
     else:
         return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
-EXPERIMENT_WS = "/home/yjin/repos/BundleSDF/experiments/gs"
-
 class GSRunner:
     def __init__(
-        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, dtype=torch.float, offset=None, scale=None, pointcloud=None, pointcloud_gt=None, poses_gt=None, wandb_run=None, run_gui=False,):
-        # build_octree_pcd=pcd_normalized,):                    # TODO from pcd add new gaussians
-        # TODO check poses c2w or obs_in_cam, z axis
+        self, cfg_gs, rgbs, depths, masks, K, poses, total_num_frames, pcd_normalized=None, dtype=torch.float):
+        """
+        @param rgbs: np.ndarray, shape (N, H, W, 3), dtype float32 
+        @param depths: np.ndarray, shape (N, H, W, 1), dtype float32
+        @param masks: np.ndarray, shape (N, H, W, 1), dtype uint8
+        @param K: np.ndarray, shape (3, 3), dtype float32
+        @param poses: np.ndarray, shape (N, 4, 4), dtype float64
+        """
         # preprocess data -> to tensor
-        self.device = torch.device(cfg_gs["primary_device"])
+        self.device = torch.device(cfg_gs["device"])
+        down_scale_ratio = cfg_gs["down_scale_ratio"]
         self.dtype = dtype
         self._total_num_frames = total_num_frames
         self.cfg_gs = cfg_gs
-
-        self._offset = offset
-        self._scale = scale
+        self.K = K
 
         self.debug_level = cfg_gs["debug_level"]
 
-        self._pcl_gt = pointcloud_gt
+        if down_scale_ratio!=1:
+            H,W = rgbs[0].shape[:2]
+            down_scale_ratio = int(down_scale_ratio)
+            rgbs = rgbs[:, ::down_scale_ratio, ::down_scale_ratio]
+            depths = depths[:, ::down_scale_ratio, ::down_scale_ratio]
+            masks = masks[:, ::down_scale_ratio, ::down_scale_ratio]
+            self.H, self.W = rgbs[0].shape[:2]
+
+            self.K[0] *= float(self.W) / W
+            self.K[1] *= float(self.H) / H
         
-        # update debug level global
-        global DEBUG_LEVEL
-        DEBUG_LEVEL = self.debug_level
+        self.H, self.W = rgbs[0].shape[:2]  
 
         colors, depths, masks = self._preprocess_images_data(rgbs, depths, masks)
-
-        self.run_gui = run_gui
-
-        if wandb_run is not None:
-            self.wandb_run = wandb_run
-            self.use_wandb = True
-
-        if self.run_gui:
-            import threading
-            self.gui_lock = threading.Lock()
-            self.gui_dict = {"join": False}
-            gui_runner = threading.Thread(target=run_gui_thread, args=(self.gui_lock, self.gui_dict, pointcloud_gt))
-            gui_runner.start()
 
         #from opengl to opencv
         #TODO  remove pose preprocess outside
@@ -543,14 +529,8 @@ class GSRunner:
         self._fisrt_c2w = poses[0].copy()
         rel_poses = self._preprocess_poses(poses)
 
-        # convert camera pose from opengl to opencv
-        poses_gt[:, :3, 1:3] = -poses_gt[:, :3, 1:3]
-        self._rel_gt_poses = self._preprocess_poses(poses_gt)
-
-        self._poses_gt = poses_gt
-
         intrinsics = torch.eye(4).to(self.device)
-        intrinsics[:3, :3] = torch.tensor(K)
+        intrinsics[:3, :3] = torch.tensor(self.K)
 
         first_data = (colors[0], depths[0], masks[0], intrinsics, rel_poses[0])
         

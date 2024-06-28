@@ -79,6 +79,20 @@ def set_logging_format():
 
 set_logging_format()
 
+def npimage2tensor(images):
+  assert len(images.shape) >=2
+  if images.dtype == 'uint8':
+    images = images.astype(np.float32)/255.0
+  elif images.dtype == 'bool':
+    images = images.astype(np.float32)
+
+  if len(images.shape) == 2:
+    return torch.tensor(images).float()
+  elif len(images.shape) == 3:
+    return torch.tensor(images).permute(2,0,1).float()
+  elif len(images.shape) == 4:
+    return torch.tensor(images).permute(0,3,1,2).float()
+
 
 def set_seed(random_seed):
   import torch,random
@@ -89,7 +103,8 @@ def set_seed(random_seed):
   torch.backends.cudnn.deterministic = True
   torch.backends.cudnn.benchmark = False
 
-
+def inverse_sigmoid(x):
+    return torch.log(x/(1-x))
 
 def add_err(pred,gt,model_pts):
   """
@@ -215,6 +230,51 @@ def geodesic_distance(R1,R2):
   cos = np.clip(cos,-1,1)
   return math.acos(cos)
 
+def create_o3d_canonical_frames(color=[0, 0, 0]):
+  # Define the vertices of the cube
+  vertices = np.array([
+      [-1, -1, -1],
+      [-1, -1,  1],
+      [-1,  1, -1],
+      [-1,  1,  1],
+      [ 1, -1, -1],
+      [ 1, -1,  1],
+      [ 1,  1, -1],
+      [ 1,  1,  1]
+  ])
+  # Define the lines connecting the vertices
+  lines = [
+      [0, 1], [0, 2], [0, 4],
+      [1, 3], [1, 5],
+      [2, 3], [2, 6],
+      [3, 7],
+      [4, 5], [4, 6],
+      [5, 7],
+      [6, 7]
+  ]
+  # Create a LineSet object
+  line_set = o3d.geometry.LineSet()
+  line_set.points = o3d.utility.Vector3dVector(vertices)
+  line_set.lines = o3d.utility.Vector2iVector(lines)
+
+  # set color
+  colors =[color for i in range(len(lines))]
+  line_set.colors = o3d.utility.Vector3dVector(colors)
+  return line_set
+
+def poses2open3dTrimesh(poses, size=0.1):
+  if isinstance(poses, torch.Tensor):
+      poses = poses.detach().cpu().numpy()
+
+  assert poses.shape[1:] == (4, 4) and len(poses.shape) == 3
+
+  poseFrames = o3d.geometry.TriangleMesh()
+  for pose in poses:
+      pose_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=size)
+      pose_frame.transform(pose)
+      poseFrames += pose_frame
+
+  return poseFrames
 
 def toOpen3dCloud(points,colors=None,normals=None):
   cloud = o3d.geometry.PointCloud()
