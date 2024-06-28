@@ -6,12 +6,9 @@ print("System Paths:")
 for p in sys.path:
     print(p)
 
-import io
-import time
 import shutil
 import time
 import yaml
-import tqdm
 import cv2
 import argparse
 import numpy as np
@@ -21,7 +18,7 @@ from importlib.machinery import SourceFileLoader
 
 from datasets.bundlegs_datasets import (load_dataset_config, HO3D_v3Dataset, BOPDataset)
 from utils.common_utils import seed_everything, save_params_ckpt, save_params
-from bundlegs import *
+from pose_splats import *
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
     if config_dict["dataset_name"].lower() in ["ho3d_v3"]:
@@ -39,7 +36,7 @@ def run_once(config: dict):
         config["workdir"], config["run_name"]
     )
 
-    # reconfigure for milk bottle
+    # reconfigure 
     cfg_bundletrack['SPDLOG'] = int(config["debug_level"])
     cfg_bundletrack['depth_processing']["zfar"] = 1
     cfg_bundletrack['depth_processing']["percentile"] = 95
@@ -66,7 +63,7 @@ def run_once(config: dict):
     cfg_track_dir = f'{out_folder}/config_bundletrack.yml'
     yaml.dump(cfg_bundletrack, open(cfg_track_dir,'w'))
 
-    # use Efficient SAM
+    # TODO use Efficient SAM
     use_segmenter = config['use_segmenter']
     if use_segmenter:
         segmenter = Segmenter()
@@ -80,7 +77,6 @@ def run_once(config: dict):
     else:
         data_cfg = load_dataset_config(dataset_config["data_cfg"])
 
-    # Poses are relative to the first frame
     dataset = get_dataset(
         config_dict=data_cfg,
         basedir=dataset_config["basedir"],
@@ -100,7 +96,7 @@ def run_once(config: dict):
         num_frames = len(dataset)
         dataset_config['num_frames'] = num_frames
 
-    tracker = BundleGS(cfg_track_dir=cfg_track_dir, cfg_gs=config, total_num_frames = num_frames, start_gs_keyframes=5, use_gui=config['use_gui'])
+    tracker = PoseSplats(cfg_track_dir=cfg_track_dir, cfg_gs=config)
 
     if config['load_checkpoint']:
         #TODO check save ckpt before updating checkpoint_time_idx and save into exp
@@ -124,7 +120,7 @@ def run_once(config: dict):
         if time_idx == 0:
             if mask is None:
                 # get initial mask through labeling 
-                if use_segomenter:
+                if use_segmenter:
                     mask = segmenter()
                 else:
                     raise("ERROR: No initial mask")
@@ -145,7 +141,7 @@ def run_once(config: dict):
         hash_object.update(id_str)
 
         # Get the hexadecimal representation of the hash
-        id_str = hash_object.hexdigest()
+        id_str = hash_object.hexdigest()[:8]
 
         # set initial pose identity
         pose_in_model = np.eye(4)
@@ -168,25 +164,27 @@ def draw():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("experiment", type=str, help="Path to experiment file")
+    parser.add_argument("--config", "-c", type=str, help="Path to config file")
 
     args = parser.parse_args()
 
     # load config
     experiment = SourceFileLoader(
-        os.path.basename(args.experiment), args.experiment
+        os.path.basename(args.config), args.config
     ).load_module()
 
     # set seed
     seed_everything(seed=experiment.config['seed'])
 
-    # Create Results Directory and Copy Config
+    # create results dir and save config
     results_dir = os.path.join(
         experiment.config["workdir"], experiment.config["run_name"]
     )
     if not experiment.config['load_checkpoint']:
         os.makedirs(results_dir, exist_ok=True)
-        shutil.copy(args.experiment, os.path.join(results_dir, "config.py"))
+        shutil.copy(args.config, os.path.join(results_dir, "config.py"))
+
+    # TODO load checkpoint, only train from scratch currently
 
     run_once(experiment.config)
     

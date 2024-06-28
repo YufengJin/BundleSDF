@@ -85,14 +85,14 @@ def run_gui(gui_dict, gui_lock):
                 "id_str",
                 "K",
                 "n_keyframe",
-                "nerf_num_frames",
+                "splats_num_frames",
             ]:
                 if k in gui_dict:
                     local_dict[k] = gui_dict[k]
                     del gui_dict[k]
 
-        if "nerf_num_frames" in local_dict:
-            gui.set_nerf_num_frames(local_dict["nerf_num_frames"])
+        if "splats_num_frames" in local_dict:
+            gui.set_splats_num_frames(local_dict["splats_num_frames"])
 
         if "mesh" in local_dict:
             logging.info(f"mesh V: {local_dict['mesh'].vertices.shape}")
@@ -115,21 +115,17 @@ def run_gui(gui_dict, gui_lock):
     visualizer.destroy_window()
     dpg.destroy_context()
 
-
-def run_nerf(
+def run_6dsplats(
     p_dict,
-    kf_to_nerf_list,
+    kf_to_splats_list,
     lock,
     cfg_gs,
-    total_num_frames,
-    translation,
-    sc_factor,
-    start_gs_keyframes,
     use_gui,
     gui_lock,
     gui_dict,
     debug_dir,
 ):
+
     def evaluate_batch_pose_error(poses_gt, poses_est):
         num_poses = poses_gt.shape[0]
         
@@ -184,8 +180,10 @@ def run_nerf(
         return rgbs,depths,masks,poses
     
     vox_res = 0.01
-    nerf_num_frames = 0
-    cnt_nerf = -1
+    total_num_frames = cfg_gs["data"]["num_frames"]
+    start_gs_keyframes = cfg_gs["start_gs_keyframes"]
+    splats_num_frames = 0
+    cnt_splats = -1
     rgbs_all = []
     depths_all = []
     normal_maps_all = []
@@ -193,14 +191,6 @@ def run_nerf(
     occ_masks_all = []
     prev_pcd_real_scale = None
     tf_normalize = None
-    if translation is not None:
-        tf_normalize = np.eye(4)
-        tf_normalize[:3, 3] = translation
-        tf1 = np.eye(4)
-        tf1[:3, :3] *= sc_factor
-        tf_normalize = tf1 @ tf_normalize
-        cfg_nerf["sc_factor"] = float(sc_factor)
-        cfg_nerf["translation"] = translation
 
     with lock:
         SPDLOG = p_dict["SPDLOG"]
@@ -214,11 +204,12 @@ def run_nerf(
 
         skip = False
         with lock:
-            if cnt_nerf == -1 and len(kf_to_nerf_list) < start_gs_keyframes:
+            # wait until start gs keyframes
+            if cnt_splats == -1 and len(kf_to_splats_list) < start_gs_keyframes:
                 skip = True
                 p_dict["running"] = False
             else:
-                if len(kf_to_nerf_list) > 0:
+                if len(kf_to_splats_list) > 0:
                     p_dict["running"] = True
                     frame_id = p_dict["frame_id"]
                     cam_in_obs = p_dict["cam_in_obs"].copy()
@@ -227,7 +218,7 @@ def run_nerf(
                     normal_maps = []
                     masks = []
                     occ_masks = []
-                    for f in kf_to_nerf_list:
+                    for f in kf_to_splats_list:
                         rgbs.append(f["rgb"])
                         depths.append(f["depth"])
                         masks.append(f["mask"])
@@ -236,23 +227,22 @@ def run_nerf(
                         if f["occ_mask"] is not None:
                             occ_masks.append(f["occ_mask"])
                     K = p_dict["K"]
-                    nerf_num_frames += len(rgbs)
-                    p_dict["nerf_num_frames"] = nerf_num_frames
-                    kf_to_nerf_list[:] = []
+                    splats_num_frames += len(rgbs)
+                    p_dict["splats_num_frames"] = splats_num_frames
+                    kf_to_splats_list[:] = []
                     if use_gui:
                         with gui_lock:
-                            gui_dict["nerf_num_frames"] = nerf_num_frames
+                            gui_dict["splats_num_frames"] = splats_num_frames
                 else:
                     skip = True
 
 
-
         if skip:
+            # wait until new frames
             time.sleep(0.01)
             continue
 
-        #ForkedPdb().set_trace()
-        cnt_nerf += 1
+        cnt_splats += 1
         rgbs_all += list(rgbs)
         depths_all += list(depths)
         masks_all += list(masks)
@@ -262,7 +252,7 @@ def run_nerf(
         if occ_masks is not None:
             occ_masks_all += list(occ_masks)
 
-        out_dir = f"{debug_dir}/{frame_id}/gs"
+        out_dir = f"{debug_dir}/{frame_id}/splats"
         logging.info(f"out_dir: {out_dir}")
         os.makedirs(out_dir, exist_ok=True)
         os.system(f"rm -rf {out_dir} && mkdir -p {out_dir}")
@@ -277,7 +267,7 @@ def run_nerf(
         
         #ForkedPdb().set_trace()
         # if cfg_nerf["continual"]:
-        #     if cnt_nerf == 0:
+        #     if cnt_splats == 0:
         #         if translation is None:
         #             # translation purpose of sc_factor and translation is to map the point cloud to the range of -1 to 1
         #             (
@@ -413,7 +403,7 @@ def run_nerf(
 
         
 
-        if cnt_nerf == 0:
+        if cnt_splats == 0:
             logging.info(f"First nerf run, create Runner, latest nerf frame {frame_id}")
             gs_runner = GSRunner(
                          cfg_gs,
@@ -466,7 +456,7 @@ def run_nerf(
         #ForkedPdb().set_trace()
 
         with lock:
-            #if nerf_num_frames > 30:
+            #if splats_num_frames > 30:
             #    p_dict["optimized_cvcam_in_obs"] = optimized_cvcam_in_obs
             p_dict["running"] = False
             # p_dict['nerf_last'] = nerf    #!NOTE not pickable
@@ -498,33 +488,25 @@ def run_nerf(
             )
 
 
-class BundleGS:
+class PoseSplats:
     def __init__(
         self,
         cfg_track_dir=f"{code_dir}/config_ho3d.yml",
         cfg_gs=None,
-        total_num_frames = None,
-        start_gs_keyframes=1,
-        translation=None,
-        sc_factor=None,
-        use_gui=False,
     ):
+        # load updated bundletrack config
         with open(cfg_track_dir, "r") as ff:
             self.cfg_track = yaml.load(ff)
         self.debug_dir = self.cfg_track["debug_dir"]
         self.SPDLOG = self.cfg_track["SPDLOG"]
+        
+        # load 6dsplats config
         self.cfg_gs = cfg_gs
-        self.start_gs_keyframes = start_gs_keyframes
-        self.use_gui = use_gui
-        self.total_num_frames = total_num_frames
-        self.translation = None
-        self.sc_factor = None
-        if sc_factor is not None:
-            self.translation = translation
-            self.sc_factor = sc_factor
+        self.use_gui = cfg_gs["use_gui"] 
 
         self.manager = multiprocessing.Manager()
 
+        # TODO uniformize two gui into one
         if self.use_gui:
             self.gui_lock = multiprocessing.Lock()
             self.gui_dict = self.manager.dict()
@@ -545,38 +527,27 @@ class BundleGS:
             self.gui_dict = None
 
         self.p_dict = self.manager.dict()
-        self.kf_to_nerf_list = self.manager.list()
+        self.kf_to_splats_list = self.manager.list()
         self.lock = multiprocessing.Lock()
         self.p_dict["running"] = False
         self.p_dict["join"] = False
-        self.p_dict["nerf_num_frames"] = 0
+        self.p_dict["splats_num_frames"] = 0
 
         self.p_dict["SPDLOG"] = self.SPDLOG
-        self.p_nerf = multiprocessing.Process(
-            target=run_nerf,
+        self.p_splats = multiprocessing.Process(
+            target=run_6dsplats,
             args=(
                 self.p_dict,
-                self.kf_to_nerf_list,
+                self.kf_to_splats_list,
                 self.lock,
                 self.cfg_gs,
-                self.total_num_frames,
-                self.translation,
-                self.sc_factor,
-                self.start_gs_keyframes,
                 self.use_gui,
                 self.gui_lock,
                 self.gui_dict,
                 self.debug_dir,
             ),
         )
-        self.p_nerf.start()
-
-        # self.p_dict = {}
-        # self.lock = threading.Lock()
-        # self.p_dict['running'] = False
-        # self.p_dict['join'] = False
-        # self.p_nerf = threading.Thread(target=self.run_nerf, args=(self.p_dict, self.lock))
-        # self.p_nerf.start()
+        self.p_splats.start()
 
         yml = my_cpp.YamlLoadFile(cfg_track_dir)
         self.bundler = my_cpp.Bundler(yml)
@@ -593,7 +564,7 @@ class BundleGS:
 
         with self.lock:
             self.p_dict["join"] = True
-        self.p_nerf.join()
+        self.p_splats.join()
         with self.lock:
             if (
                 self.p_dict["running"] == False
@@ -730,7 +701,6 @@ class BundleGS:
             self.bundler.forgetFrame(frame)
             return
 
-        # TODO 23-03-23-41
         # matches = self.bundler._fm._matches[(frame, ref_frame)]
         if len(matches) < min_match_with_ref:
             visibles = []
@@ -844,17 +814,15 @@ class BundleGS:
         if self.bundler._keyframes[-1] == frame:
             logging.info(f"{frame._id_str} prepare data for nerf")
 
-            # NOTE send new frame to nerf fro training
+            # NOTE send new frame to 6Dsplats for training
             with self.lock:
                 self.p_dict["frame_id"] = frame._id_str
                 self.p_dict["running"] = True
-                self.kf_to_nerf_list.append(
+                self.kf_to_splats_list.append(
                     {
                         "rgb": np.array(frame._color).reshape(H, W, 3)[..., ::-1].copy(),
                         "depth": np.array(frame._depth).reshape(H, W).copy(),
                         "mask": np.array(frame._fg_mask).reshape(H, W).copy(),
-                        # 'occ_mask': occ_mask.reshape(H,W),
-                        # 'normal_map': np.array(frame._normal_map).copy(),
                         "occ_mask": None,
                         "normal_map": None,
                     }
@@ -864,29 +832,26 @@ class BundleGS:
                     cam_in_obs.append(np.array(f._pose_in_model).copy())
                 self.p_dict["cam_in_obs"] = np.array(cam_in_obs)
 
-            #ForkedPdb().set_trace()
 
             if self.SPDLOG >= 2:
                 with open(
-                    f"{self.debug_dir}/{frame._id_str}/nerf_frames.txt", "w"
+                    f"{self.debug_dir}/{frame._id_str}/keyframes.txt", "w"
                 ) as ff:
                     for f in self.bundler._keyframes:
                         ff.write(f"{f._id_str}\n")
 
-            ############# Wait for sync              # ????????????? why
+            ############# Wait for sync          
             while 1:
                 with self.lock:
                     running = self.p_dict["running"]
-                    nerf_num_frames = self.p_dict["nerf_num_frames"]
-                #print(f'////////////////Nerf is running :{running}, and nerf_num_frames: {nerf_num_frames}, len(self.bundler._keyframes): {len(self.bundler._keyframes)}')
+                    splats_num_frames = self.p_dict["splats_num_frames"]
                 if not running:
                     break
                 if (
-                    len(self.bundler._keyframes) - nerf_num_frames
+                    len(self.bundler._keyframes) - splats_num_frames
                     >= self.cfg_gs["sync_max_delay"]
                 ):
                     time.sleep(0.01)
-                    #logging.info(f"wait for sync len(self.bundler._keyframes):{len(self.bundler._keyframes)}, nerf_num_frames:{nerf_num_frames}")
                     continue
                 break
 
@@ -932,7 +897,7 @@ class BundleGS:
         if rematch_after_nerf:
             if len(frames_large_update) > 0:
                 with self.lock:
-                    nerf_num_frames = self.p_dict["nerf_num_frames"]
+                    splats_num_frames = self.p_dict["splats_num_frames"]
                 logging.info(f"before matches keys: {len(self.bundler._fm._matches)}")
                 ks = list(self.bundler._fm._matches.keys())
                 for k in ks:

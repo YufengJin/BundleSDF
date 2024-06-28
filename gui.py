@@ -49,7 +49,7 @@ class BundleSdfGui:
     dpg.add_group(horizontal=True,tag='row3',parent='main')
     dpg.add_text("frame: 0",tag='frame_id',color=[0,255,0], parent='row3')
     dpg.add_text("keyframe_num: 0",tag='keyframe_num',color=[0,255,0], parent='row3')
-    dpg.add_text("nerf_num_frames: X",tag='nerf_num_frames',color=[0,255,0], parent='row3')
+    dpg.add_text("splats_num_frames: X",tag='splats_num_frames',color=[0,255,0], parent='row3')
 
     dpg.set_primary_window("main", True)
     dpg.set_viewport_title('BundleSDF')
@@ -183,8 +183,8 @@ class BundleSdfGui:
     self.mesh_max_xyz = self.mesh.vertices.max(axis=0)
 
 
-  def set_nerf_num_frames(self, nerf_num_frames):
-    dpg.set_value('nerf_num_frames', f"nerf_num_frames: {nerf_num_frames}")
+  def set_splats_num_frames(self, splats_num_frames):
+    dpg.set_value('splats_num_frames', f"splats_num_frames: {splats_num_frames}")
 
 
 if __name__=="__main__":

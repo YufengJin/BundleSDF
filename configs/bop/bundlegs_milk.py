@@ -1,28 +1,32 @@
 import os
 from os.path import join as p_join
 
+# TODO clean unused params
+# TODO seperate static and dynamic params, dynamic params could be updated on the top
 primary_device="cuda:0"
 seed = 0
-use_gui = False
+use_gui = True 
 debug_level= 2 
 
 scene_name = '000000'
 
 target_object_id = 101
-
+start_gs_keyframes = 5 # start keyframes for gaussian splats
 map_every = 1
-keyframe_every = 5                 #TODO change different criteria to get keyframe
+keyframe_every = 5                
 mapping_window_size = 24
 tracking_iters = 80 
 mapping_iters = 80
 
-group_name = "bop"
+group_name = "bop_custom_milk"
 run_name = f"{scene_name}_{seed}"
 
+# TODO architecure for the config
 config = dict(
-    bundletrack_cfg = './BundleTrack/config_ho3d.yml',
+    bundletrack_cfg = './BundleTrack/config_ho3d.yml',      # default config file for bundletrack
     workdir=f"./experiments/{group_name}",
     run_name=run_name,
+    start_gs_keyframes=start_gs_keyframes,
     debug_level=debug_level, 
     seed=seed,
     primary_device=primary_device,
@@ -112,8 +116,8 @@ config = dict(
     data=dict(
         basedir="/home/datasets/BOP/milk", 
         data_cfg="./configs/data/bop.yaml",  #None
-        sequence=scene_name,
-        target_object_id = target_object_id,
+        sequence=scene_name,      
+        target_object_id = target_object_id,    # target object in the scene
         desired_image_height=480,
         desired_image_width=640,
         start=0,
