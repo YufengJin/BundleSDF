@@ -6,7 +6,7 @@ from os.path import join as p_join
 device="cuda:0"
 seed = 0
 use_gui = False 
-debug_level= 2 
+debug_level= 0 
 
 scene_name = '000000'
 
@@ -68,51 +68,33 @@ config = dict(
         eps=0.06,
         eps_min_samples=1,
     ),
-    add_gaussian_dict=dict( # Needs to be updated based on the number of mapping iterations
-        every_iter=100,
-        sil_thres=0.8,
-        depth_thres=0.01,
+    optimizer=dict(
+        lrs=dict(
+                means3D=0.0001,
+                rgb_colors=0.0025,
+                unnorm_rotations=0.001,
+                logit_opacities=0.05,
+                log_scales=0.001,
+                cam_unnorm_rots=0.001,
+                cam_trans=0.0001,
+                sdf=0.0001,
+            ),
     ),
     train=dict(
-        num_epochs=1,
-        batch_size=20,
-        batch_iters=50,
+        num_epochs=500,
+        batch_size=10,
         sil_thres=0.9,
-        lrs=dict(
-            #means3D=0.0001,
-            #rgb_colors=0.0025,
-            #unnorm_rotations=0.001,
-            #logit_opacities=0.05,
-            #log_scales=0.001,
-            #cam_unnorm_rots=0.0
-            #cam_trans=0.00,
-            means3D=0.0,
-            rgb_colors=0.0,
-            unnorm_rotations=0.0,
-            logit_opacities=0.0,
-            log_scales=0.00,
-            cam_unnorm_rots=0.00,
-            cam_trans=0.000,
-        ),
+        use_edge_loss=True,
+        use_depth_loss=True,
+        use_silhouette_loss=True,
+        use_im_loss=True,
         loss_weights=dict(
             im=1.,
             depth=1.,
             edge=0.,
             silhouette=1.
         ),
-        prune_gaussians=False, # Prune Gaussians during Mapping
-        pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
-            start_after=0,
-            remove_big_after=3000,
-            stop_after=5000,
-            prune_every=1,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.25,
-            reset_opacities=False,
-            reset_opacities_every=500, # Doesn't consider iter 0
-        ),
-        use_gaussian_splatting_densification=True, # Use Gaussian Splatting-based Densification during Mapping
-        densify_dict=dict( # Needs to be updated based on the number of mapping iterations
+        densification=dict( # Needs to be updated based on the number of mapping iterations
             start_after=100,
             remove_big_after=500,
             stop_after=5000,
@@ -124,14 +106,6 @@ config = dict(
             reset_opacities=False,
             reset_opacities_every=600, # Doesn't consider iter 0
         ),
-    ),
-    wandb=dict(
-        #entity="theairlab",
-        project="SplaTAM",
-        #group=group_name,
-        name=run_name,
-        save_qual=False,
-        eval_save_qual=True,
     ),
     data=dict(
         basedir="/home/datasets/BOP/milk", 

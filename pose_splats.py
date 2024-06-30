@@ -243,7 +243,6 @@ def run_6dsplats(
 
         out_dir = f"{debug_dir}/{frame_id}_splats_{cnt_splats}"
         logging.info(f"out_dir: {out_dir}")
-        os.makedirs(out_dir, exist_ok=True)
         os.system(f"rm -rf {out_dir} && mkdir -p {out_dir}")
 
         # update save dir for 6dsplats debug
@@ -346,6 +345,7 @@ def run_6dsplats(
         
         logging.info(f"Start GSRunner Training")
         gs_runner.train()
+        1/0
         logging.info(f"GSRunner Training Done")
 
         # TODO get optimized poses
