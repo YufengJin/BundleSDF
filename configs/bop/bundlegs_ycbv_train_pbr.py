@@ -6,8 +6,8 @@ scenes = ["000000", "000001", "000002", "000003", "000004", "000005", "000006", 
 
 device="cuda:0"
 seed = 0
-use_gui = False
-debug_level= 3 # 0: No Debug, 1: Only Text Info, 2: Save Debug Images, 3: visualize gaussian, 4: Save gaussians ply
+use_gui = False 
+debug_level= 2 
 
 scene_name = scenes[0]
 
@@ -37,24 +37,35 @@ Object 21 (061_foam_brick): [-0.0805, 0.0805, -8.2435]
 """
 
 target_object_id = 5    
-map_every = 1 
+start_gs_keyframes = 5 # start keyframes for gaussian splats
+map_every = 1
 keyframe_every = 5
 mapping_window_size = 24
 tracking_iters = 80 
 mapping_iters = 80
 
-group_name = "bop"
+group_name = "bop_ycbv_train"
 run_name = f"{scene_name}_{seed}"
 
 config = dict(
     bundletrack_cfg = './BundleTrack/config_ho3d.yml',
     workdir=f"./experiments/{group_name}",
     run_name=run_name,
+    start_gs_keyframes=start_gs_keyframes,
     debug_level=debug_level, 
     seed=seed,
     device=device,
     use_segmenter=False,
+    continual=True,    # Continual Learning scale factor and translation
     use_gui=use_gui,
+    
+    # octree
+    use_octree=True, # Use Octree
+    octree_smallest_voxel_size=0.02, # Smallest Voxel Size for Octree
+    octree_raytracing_voxel_size=0.02,
+    octree_dilate_size=0.02, 
+
+    down_scale_ratio=2, # Downscale Ratio for RGB and Depth
     map_every=map_every, # Mapping every nth frame
     keyframe_every=keyframe_every, # Keyframe every nth frame
     mapping_window_size=mapping_window_size, # Mapping window size
@@ -69,62 +80,46 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    save_ply=True, # Save Parameters
-    save_ply_interval=500, # Save Parameters Interval
     use_wandb=False,
     add_new_gaussians=False, # add new gaussians during training         
-    add_gaussian_dict=dict( # Needs to be updated based on the number of mapping iterations
-        every_iter=100,
-        sil_thres=0.8,
-        depth_thres=0.01,
+    vox_res=0.01, # Voxel Resolution for DBSCAN
+    gaussians=dict(
+        rgb2sh=False, # Convert RGB to SH
+        init_pts_noise=0.02, # Initial Gaussian Noise
+        distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
+
     ),
-    debug=dict(
-        save_images=False,
-        save_images_every=100,
-        save_gaussians_info=False,
-        save_gaussians_info_every=10,
+    dbscan=dict(
+        eps=0.06,
+        eps_min_samples=1,
+    ),
+    optimizer=dict(
+        lrs=dict(
+                means3D=0.0001,
+                rgb_colors=0.0025,
+                unnorm_rotations=0.001,
+                logit_opacities=0.05,
+                log_scales=0.001,
+                cam_unnorm_rots=0.001,
+                cam_trans=0.0001,
+                sdf=0.0001,
+            ),
     ),
     train=dict(
-        num_epochs=1,
+        num_epochs=500,
         batch_size=10,
-        batch_iters=1000,
         sil_thres=0.9,
-        lrs=dict(
-            means3D=0.0001,
-            rgb_colors=0.0025,
-            unnorm_rotations=0.001,
-            logit_opacities=0.05,
-            log_scales=0.001,
-            cam_unnorm_rots=0.001,
-            cam_trans=0.0001
-        ),
+        use_edge_loss=True,
+        use_depth_loss=True,
+        use_silhouette_loss=True,
+        use_im_loss=True,
         loss_weights=dict(
-            mapping=dict(
-                im=0.,
-                depth=1.,
-                edge=0.,
-                silhouette=0.
-            ),
-            tracking=dict(
-                im=1., 
-                depth=1.,
-                edge=0.,
-                silhouette=0.
-            ),
+            im=1.,
+            depth=1.,
+            edge=0.,
+            silhouette=1.
         ),
-        prune_gaussians=False, # Prune Gaussians during Mapping
-        pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
-            start_after=0,
-            remove_big_after=3000,
-            stop_after=5000,
-            prune_every=1,
-            removal_opacity_threshold=0.005,
-            final_removal_opacity_threshold=0.25,
-            reset_opacities=False,
-            reset_opacities_every=500, # Doesn't consider iter 0
-        ),
-        use_gaussian_splatting_densification=True, # Use Gaussian Splatting-based Densification during Mapping
-        densify_dict=dict( # Needs to be updated based on the number of mapping iterations
+        densification=dict( # Needs to be updated based on the number of mapping iterations
             start_after=100,
             remove_big_after=500,
             stop_after=5000,
@@ -136,14 +131,6 @@ config = dict(
             reset_opacities=False,
             reset_opacities_every=600, # Doesn't consider iter 0
         ),
-    ),
-    wandb=dict(
-        #entity="theairlab",
-        project="SplaTAM",
-        #group=group_name,
-        name=run_name,
-        save_qual=False,
-        eval_save_qual=True,
     ),
     data=dict(
         basedir="/home/datasets/BOP/ycbv/train_pbr", 

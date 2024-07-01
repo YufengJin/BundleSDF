@@ -494,7 +494,7 @@ class SplatsRunner:
         )
         variables["seen"] = seen
 
-        if self.DEBUG_MODE >=2 and self._N_epoch % 20 == 0:
+        if self.DEBUG_MODE >=2 and self._N_epoch % 100 == 0:
 # evaluaaussian depth rendering
             fig, ax = plt.subplots(4, 4, figsize=(12, 12))
             weighted_render_im = im * color_mask

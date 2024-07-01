@@ -345,7 +345,6 @@ def run_6dsplats(
         
         logging.info(f"Start GSRunner Training")
         gs_runner.train()
-        1/0
         logging.info(f"GSRunner Training Done")
 
         # TODO get optimized poses

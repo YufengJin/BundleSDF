@@ -6,14 +6,41 @@ from os.path import join as p_join
 device="cuda:0"
 seed = 0
 use_gui = False 
-debug_level= 0 
+debug_level= 2 
 
 scene_name = '000000'
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 target_object_id = 101
 start_gs_keyframes = 5 # start keyframes for gaussian splats
 map_every = 1
-keyframe_every = 5                
+keyframe_every = 5
 mapping_window_size = 24
 tracking_iters = 80 
 mapping_iters = 80
@@ -110,7 +137,7 @@ config = dict(
     data=dict(
         basedir="/home/datasets/BOP/milk", 
         data_cfg="./configs/data/bop.yaml",  #None
-        sequence=scene_name,      
+        sequence=scene_name,
         target_object_id = target_object_id,    # target object in the scene
         desired_image_height=480,
         desired_image_width=640,
