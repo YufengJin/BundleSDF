@@ -1,0 +1,66 @@
+services:
+  bundlesdf:
+    image: ${IMAGE:-bundlesdf:latest}
+    container_name: bundlesdf
+    build:
+      # Context is the BundleSDF repo root (one level up from this file)
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        CMAKE_VERSION_MAJOR: "3"
+        CMAKE_VERSION_MINOR: "25"
+        CMAKE_VERSION_PATCH: "3"
+        EIGEN_VERSION_MAJOR: "3"
+        EIGEN_VERSION_MINOR: "4"
+        EIGEN_VERSION_PATCH: "0"
+        OPENCV_VERSION_MAJOR: "4"
+        OPENCV_VERSION_MINOR: "11"
+        OPENCV_VERSION_PATCH: "0"
+        PCL_VERSION_MAJOR: "1"
+        PCL_VERSION_MINOR: "10"
+        PCL_VERSION_PATCH: "0"
+        PYBIND11_VERSION_MAJOR: "2"
+        PYBIND11_VERSION_MINOR: "13"
+        PYBIND11_VERSION_PATCH: "0"
+        YAML_CPP_VERSION_MAJOR: "0"
+        YAML_CPP_VERSION_MINOR: "8"
+        YAML_CPP_VERSION_PATCH: "0"
+        PYTHON_VERSION: "3.10"
+
+    network_mode: host
+
+    stdin_open: true
+    tty: true
+
+    privileged: true
+    runtime: nvidia
+
+    environment:
+      # GPU
+      NVIDIA_VISIBLE_DEVICES: "${NVIDIA_VISIBLE_DEVICES:-all}"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,video,utility"
+      # GUI / X11
+      DISPLAY: "${DISPLAY}"
+      QT_X11_NO_MITSHM: "1"
+      # Build control
+      SKIP_BUILD: "${SKIP_BUILD:-0}"
+
+    volumes:
+      # X11 forwarding (run `xhost +local:root` on host if blocked)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Live-mount BundleSDF source (edits visible without rebuild)
+      - ../:/workspace/BundleSDF:rw
+      # HuggingFace cache (avoids re-downloading weights)
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface:rw
+      # Datasets / external data (adjust path as needed)
+      # - /mnt/data:/mnt/data:ro
+
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+
+    command: tail -f /dev/null

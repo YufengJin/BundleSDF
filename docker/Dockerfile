@@ -112,6 +112,16 @@ RUN apt-get update --fix-missing && apt-get install -y --no-install-recommends \
     freeglut3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Use gcc-12 to avoid gcc-11 internal compiler errors when building OpenCV 4.11.
+# librealsense source list (preinstalled in deepstream base) has an expired GPG key
+# and is unused here, so drop it before apt update.
+RUN rm -f /etc/apt/sources.list.d/*librealsense*.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gcc-12 g++-12 && \
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 100 \
+                        --slave  /usr/bin/g++ g++ /usr/bin/g++-12 && \
+    rm -rf /var/lib/apt/lists/*
+
 
 # Install cmake
 RUN cd / &&\
@@ -178,7 +188,7 @@ RUN cd / && \
         -DPKG_CONFIG_PATH=/usr/local/lib/pkgconfig \
         -DINSTALL_PYTHON_EXAMPLES=OFF \
         -DINSTALL_C_EXAMPLES=OFF && \
-    make -j$(nproc) && \
+    make -j$(($(nproc) > 16 ? 16 : $(nproc))) && \
     make install && \
     cd / && \
     rm -rf /opencv /opencv_contrib
