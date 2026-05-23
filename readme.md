@@ -4,6 +4,44 @@ This is an implementation of our paper published in CVPR 2023
 
 [[Arxiv](https://arxiv.org/abs/2303.14158)] [[Project page](https://bundlesdf.github.io/)] [[Supplemental video](https://www.youtube.com/watch?v=5PymzKbKv8w/)]
 
+# 快速开始（本 fork）
+
+本 fork 已将环境升级到现代 CUDA 12.x / PyTorch 2.6 栈（DeepStream 7.1 + kaolin 0.17
++ pytorch3d + SAM2），通过 docker compose 一键构建运行，并新增了 ZED 录制与 SAM2 掩码
+生成的 helper 脚本。完整说明见下方各章节。
+
+## 1. 启动容器
+```bash
+cd docker
+docker compose up -d --build       # 首次：构建镜像 + 启动容器（耗时较久）
+docker compose exec bundlesdf bash # 进入容器
+# 后续：docker compose up -d && docker compose exec bundlesdf bash
+```
+首次启动时 entrypoint 会自动编译 mycuda / BundleTrack。
+
+## 2. 准备权重
+- XMem 分割权重 → `./BundleTrack/XMem/saves/XMem-s012.pth`
+- LoFTR 权重 → `./BundleTrack/LoFTR/weights/outdoor_ds.ckpt`
+- （可选，SAM2 掩码）`sam2.1_hiera_small.pt` → `.docker_assets/sam2_checkpoints/`
+
+（下载链接见下方 "Data download" / "Docker/Environment setup" 章节）
+
+## 3. 跑自定义 RGBD 数据（容器内）
+```bash
+# 可选：从 ZED 相机录制 rgb/ depth/ cam_K.txt
+python scripts/data_record_bundlesdf.py --obj milk --res HD720 --depth_mode NEURAL
+
+# 用 SAM2 生成 masks/
+python scripts/make_masks_sam2.py --video_dir demo_data/<your_clip>
+
+# 跑跟踪+重建，再全局精修
+python run_custom.py --mode run_video    --video_dir <dir> --out_folder <out> --use_segmenter 1 --use_gui 1 --debug_level 2
+python run_custom.py --mode global_refine --video_dir <dir> --out_folder <out>
+```
+结果在 `out_folder`：位姿在 `ob_in_cam/`，带纹理网格 `textured_mesh.obj`。
+
+---
+
 # Abstract
 We present a near real-time method for 6-DoF tracking of an unknown object from a monocular RGBD video sequence, while simultaneously performing neural 3D reconstruction of the object. Our method works for arbitrary rigid objects, even when visual texture is largely absent. The object is assumed to be segmented in the first frame only. No additional information is required, and no assumption is made about the interaction agent. Key to our method is a Neural Object Field that is learned concurrently with a pose graph optimization process in order to robustly accumulate information into a consistent 3D representation capturing both geometry and appearance. A dynamic pool of posed memory frames is automatically maintained to facilitate communication between these threads. Our approach handles challenging sequences with large pose changes, partial and full occlusion, untextured surfaces, and specular highlights. We show results on HO3D, YCBInEOAT, and BEHAVE datasets, demonstrating that our method significantly outperforms existing approaches.
 
