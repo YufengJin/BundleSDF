@@ -4,41 +4,47 @@ This is an implementation of our paper published in CVPR 2023
 
 [[Arxiv](https://arxiv.org/abs/2303.14158)] [[Project page](https://bundlesdf.github.io/)] [[Supplemental video](https://www.youtube.com/watch?v=5PymzKbKv8w/)]
 
-# 快速开始（本 fork）
+# Quick Start (this fork)
 
-本 fork 已将环境升级到现代 CUDA 12.x / PyTorch 2.6 栈（DeepStream 7.1 + kaolin 0.17
-+ pytorch3d + SAM2），通过 docker compose 一键构建运行，并新增了 ZED 录制与 SAM2 掩码
-生成的 helper 脚本。完整说明见下方各章节。
+This fork upgrades the environment to a modern CUDA 12.x / PyTorch 2.6 stack
+(DeepStream 7.1 + kaolin 0.17 + pytorch3d + SAM2), builds and runs via a single
+`docker compose` command, and adds helper scripts for ZED recording and SAM2 mask
+generation. See the sections below for full details.
 
-## 1. 启动容器
+This fork uses **SAM2** to segment object masks and pre-processes the dataset offline,
+instead of running XMem online. Because masks are produced ahead of time, you do **not**
+need the XMem weights, and you run BundleSDF with `--use_segmenter 0`.
+
+## 1. Start the container
 ```bash
 cd docker
-docker compose up -d --build       # 首次：构建镜像 + 启动容器（耗时较久）
-docker compose exec bundlesdf bash # 进入容器
-# 后续：docker compose up -d && docker compose exec bundlesdf bash
+docker compose up -d --build       # first time: build image + start container (takes a while)
+docker compose exec bundlesdf bash # open a shell in the container
+# later sessions: docker compose up -d && docker compose exec bundlesdf bash
 ```
-首次启动时 entrypoint 会自动编译 mycuda / BundleTrack。
+On first start the entrypoint automatically compiles `mycuda` / `BundleTrack`.
 
-## 2. 准备权重
-- XMem 分割权重 → `./BundleTrack/XMem/saves/XMem-s012.pth`
-- LoFTR 权重 → `./BundleTrack/LoFTR/weights/outdoor_ds.ckpt`
-- （可选，SAM2 掩码）`sam2.1_hiera_small.pt` → `.docker_assets/sam2_checkpoints/`
+## 2. Prepare weights
+- LoFTR weights → `./BundleTrack/LoFTR/weights/outdoor_ds.ckpt`
+- SAM2 checkpoint `sam2.1_hiera_small.pt` → `.docker_assets/sam2_checkpoints/`
 
-（下载链接见下方 "Data download" / "Docker/Environment setup" 章节）
+(XMem weights are not needed in this fork — masks come from SAM2. Download links are in
+the "Data download" / "Docker/Environment setup" sections below.)
 
-## 3. 跑自定义 RGBD 数据（容器内）
+## 3. Run on custom RGBD data (inside the container)
 ```bash
-# 可选：从 ZED 相机录制 rgb/ depth/ cam_K.txt
+# (optional) record rgb/ depth/ cam_K.txt from a ZED camera
 python scripts/data_record_bundlesdf.py --obj milk --res HD720 --depth_mode NEURAL
 
-# 用 SAM2 生成 masks/
+# generate masks/ with SAM2 (offline pre-processing)
 python scripts/make_masks_sam2.py --video_dir demo_data/<your_clip>
 
-# 跑跟踪+重建，再全局精修
-python run_custom.py --mode run_video    --video_dir <dir> --out_folder <out> --use_segmenter 1 --use_gui 1 --debug_level 2
+# joint tracking + reconstruction, then global refinement
+# NOTE: --use_segmenter 0 because masks are already provided by SAM2
+python run_custom.py --mode run_video    --video_dir <dir> --out_folder <out> --use_segmenter 0 --use_gui 1 --debug_level 2
 python run_custom.py --mode global_refine --video_dir <dir> --out_folder <out>
 ```
-结果在 `out_folder`：位姿在 `ob_in_cam/`，带纹理网格 `textured_mesh.obj`。
+Results land in `out_folder`: tracked poses in `ob_in_cam/`, textured mesh `textured_mesh.obj`.
 
 ---
 
@@ -147,8 +153,9 @@ python scripts/make_masks_sam2.py --video_dir demo_data/<your_clip> --bbox 440 1
 
 - Run your RGBD video (specify the video_dir and your desired output path). There are 3 steps. Note we assume the max relevant depth in the demo data <1. If this is not the case for you, change it [here](https://github.com/NVlabs/BundleSDF/blob/master/BundleTrack/config_ho3d.yml#L16)
 ```
-# 1) Run joint tracking and reconstruction. 
-python run_custom.py --mode run_video --video_dir /home/bowen/debug/2022-11-18-15-10-24_milk --out_folder /home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk --use_segmenter 1 --use_gui 1 --debug_level 2
+# 1) Run joint tracking and reconstruction.
+# In this fork masks are pre-generated with SAM2 (step above), so use --use_segmenter 0.
+python run_custom.py --mode run_video --video_dir /home/bowen/debug/2022-11-18-15-10-24_milk --out_folder /home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk --use_segmenter 0 --use_gui 1 --debug_level 2
 
 # 2) Run global refinement post-processing to refine the mesh
 python run_custom.py --mode global_refine --video_dir /home/bowen/debug/2022-11-18-15-10-24_milk --out_folder /home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk   # Change the path to your video_directory
