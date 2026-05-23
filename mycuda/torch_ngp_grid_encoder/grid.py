@@ -11,6 +11,12 @@ import numpy as np
 import os,sys,pdb
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(code_dir)
+# The compiled `gridencoder.*.so` is built in-place in the parent (mycuda/)
+# directory by `pip install -e .`. Add that directory to sys.path so the bare
+# `import gridencoder` below resolves even when the editable-install path entry
+# is not registered in the running process (e.g. fresh container, spawned
+# multiprocessing worker). Without this, only `from mycuda import ...` works.
+sys.path.append(os.path.dirname(code_dir))
 import torch
 import torch.nn as nn
 from torch.autograd import Function

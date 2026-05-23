@@ -40,19 +40,38 @@ year          = {2023},
 
 
 # Docker/Environment setup
-- Build the docker image (this only needs to do once and can take some time).
+
+The environment has been upgraded to a modern CUDA 12.x / PyTorch 2.6 stack
+(NVIDIA DeepStream 7.1 base image, kaolin 0.17, pytorch3d, SAM2). It is built and
+run via **docker compose** — the repo is live-mounted into the container, so source
+edits take effect without rebuilding.
+
+- (Optional, only if you use SAM2 mask generation) download the SAM2 checkpoint once
+  on the host. It is **not** baked into the image and **not** committed — it is
+  bind-mounted from `.docker_assets/` (see `docker/docker-compose.yaml`):
+```
+mkdir -p .docker_assets/sam2_checkpoints
+curl -fL https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt \
+     -o .docker_assets/sam2_checkpoints/sam2.1_hiera_small.pt
+```
+
+- Build the image and start the container (build only needs to happen once and can
+  take a while). The entrypoint compiles the machine-dependent C++/CUDA modules
+  (`mycuda`, `BundleTrack`) on first start automatically.
 ```
 cd docker
-docker build --network host -t nvcr.io/nvidian/bundlesdf .
+docker compose up -d --build      # build image + start container (named "bundlesdf")
+docker compose exec bundlesdf bash # open a shell inside the running container
 ```
 
-- Start a docker container the first time
+- Subsequent sessions (image already built):
 ```
-cd docker && bash run_container.sh
+cd docker && docker compose up -d
+docker compose exec bundlesdf bash
+```
 
-# Inside docker container, compile the packages which are machine dependent
-bash build.sh
-```
+> GUI tools (the SAM2 labeler, `--use_gui`) need X11. The compose file forwards
+> `$DISPLAY`; if windows are blocked run `xhost +local:root` on the host first.
 
 # Run on your custom data
 - Prepare your RGBD video folder as below (also refer to the example milk data). You can find an [example milk data here](https://drive.google.com/file/d/1akutk_Vay5zJRMr3hVzZ7s69GT4gxuWN/view?usp=share_link) for testing.
@@ -65,6 +84,28 @@ root
 ```
 
 Due to license issues, we are not able to include [XMem](https://github.com/hkchengrex/XMem) in this codebase for running segmentation online. If you are interested in doing so, please download the code separately and add a wrapper in `segmentation_utils.py`.
+
+### Helper scripts (this fork)
+
+Two helper scripts are provided to produce the layout above (run them **inside the
+container**):
+
+- **Record from a ZED camera** → writes `rgb/`, `depth/` (mm uint16) and `cam_K.txt`:
+```
+python scripts/data_record_bundlesdf.py --obj milk --res HD720 --depth_mode NEURAL
+# Ctrl-C to stop. Output goes to a timestamped folder under demo_data/.
+```
+
+- **Generate `masks/` with SAM2** (interactive labeler or headless box). Requires the
+  SAM2 checkpoint downloaded above:
+```
+# GUI: scroll frames, drag a box / click points on any frame, Space to propagate, 'w' to save
+python scripts/make_masks_sam2.py --video_dir demo_data/<your_clip>
+
+# Headless: box on frame 0, propagate, save
+python scripts/make_masks_sam2.py --video_dir demo_data/<your_clip> --bbox 440 180 840 560
+```
+  SAM2 paths/thresholds live in `configs/sam2.yaml`.
 
 - Run your RGBD video (specify the video_dir and your desired output path). There are 3 steps. Note we assume the max relevant depth in the demo data <1. If this is not the case for you, change it [here](https://github.com/NVlabs/BundleSDF/blob/master/BundleTrack/config_ho3d.yml#L16)
 ```
@@ -79,6 +120,22 @@ python run_custom.py --mode draw_pose --out_folder /home/bowen/debug/bundlesdf_2
 ```
 
 - Finally the results will be dumped in the `out_folder`, including the tracked poses stored in `ob_in_cam/` and reconstructed mesh with texture `textured_mesh.obj`.
+
+### Viewing the textured mesh
+
+`textured_mesh.obj` is a valid OBJ, but the **MeshLab 2020.09** shipped by Ubuntu apt
+has a buggy OBJ importer that can abort with
+`import_obj.h:640: Assertion ... numVerticesPlusFaces ... failed` (core dump). This is
+a MeshLab importer bug, not a problem with the mesh (it loads fine in trimesh, Blender,
+f3d, etc.). Options:
+
+- Use a viewer with a different importer — recommended `f3d` (lightweight, opens the
+  textured OBJ directly): `sudo apt install f3d && f3d out_folder/textured_mesh.obj`.
+  Blender and CloudCompare also work.
+- Or use the latest MeshLab AppImage (importer rewritten, bug fixed) from the
+  [MeshLab releases](https://github.com/cnr-isti-vclab/meshlab/releases).
+- Or convert the mesh (e.g. with trimesh) to `.glb`/`.ply`, which MeshLab 2020.09 reads
+  without issue.
 
 <img src="./media/milk_jug.gif" height="400">
 

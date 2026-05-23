@@ -6,6 +6,15 @@ services:
       # Context is the BundleSDF repo root (one level up from this file)
       context: ..
       dockerfile: docker/Dockerfile
+      # Persistent layer cache on host filesystem. Requires the
+      # `docker-container` buildx driver (see `docker buildx ls`).
+      # Survives daemon restart, `docker builder prune`, and reboots.
+      cache_from:
+        - type=local,src=/home/yjin/.cache/docker-build/bundlesdf
+      # mode=min: only cache final layer, avoid IO write amplification during
+      # heavy build steps (OpenCV) that previously froze the host.
+      cache_to:
+        - type=local,dest=/home/yjin/.cache/docker-build/bundlesdf,mode=min
       args:
         CMAKE_VERSION_MAJOR: "3"
         CMAKE_VERSION_MINOR: "25"
@@ -28,6 +37,10 @@ services:
         PYTHON_VERSION: "3.10"
 
     network_mode: host
+
+    # Land in the live-mounted repo for both the main process and `docker exec`
+    # (base deepstream image's WORKDIR is /opt/nvidia/deepstream/...).
+    working_dir: /workspace/BundleSDF
 
     stdin_open: true
     tty: true
@@ -52,6 +65,18 @@ services:
       - ../:/workspace/BundleSDF:rw
       # HuggingFace cache (avoids re-downloading weights)
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface:rw
+      # SAM2 checkpoint for scripts/make_masks_sam2.py — kept OUT of the image.
+      # Populate once on the host:
+      #   mkdir -p .docker_assets/sam2_checkpoints && \
+      #   curl -fL https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt \
+      #        -o .docker_assets/sam2_checkpoints/sam2.1_hiera_small.pt
+      - ../.docker_assets/sam2_checkpoints:/opt/sam2/checkpoints:ro
+      # Persist ZED NEURAL depth model TensorRT optimization (~5 min, once per GPU),
+      # so `compose down` + recreate does not re-optimize. Named volume (not bind
+      # mount): on first mount Docker copies the image's existing
+      # /usr/local/zed/resources contents into the volume, so SDK-shipped files
+      # are preserved instead of being shadowed by an empty host dir.
+      - zed_resources:/usr/local/zed/resources:rw
       # Datasets / external data (adjust path as needed)
       # - /mnt/data:/mnt/data:ro
 
@@ -64,3 +89,7 @@ services:
         hard: 67108864
 
     command: tail -f /dev/null
+
+volumes:
+  # ZED NEURAL depth model TensorRT optimization cache (see bundlesdf.volumes).
+  zed_resources:

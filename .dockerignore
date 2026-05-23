@@ -1,0 +1,10 @@
+# The Dockerfile builds everything from apt/git/pip and the repo is live-mounted
+# at runtime (docker-compose volume), so nothing here is COPY'd into the image.
+# Keep the build context tiny so buildkit doesn't ship gigabytes every build.
+.git
+demo_data
+.docker_assets
+build_logs
+docs
+**/__pycache__
+*.pyc

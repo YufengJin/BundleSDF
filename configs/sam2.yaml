@@ -1,0 +1,14 @@
+# SAM2 single-object mask generation config.
+# Consumed by scripts/make_masks_sam2.py.
+#
+# checkpoint/model_cfg come from the SAM2 real-time fork
+# (github.com/Gy920/segment-anything-2-real-time), installed at /opt/sam2 by
+# docker/Dockerfile. The checkpoint is bind-mounted via docker-compose.yaml
+# from .docker_assets/sam2_checkpoints/ (NOT baked into the image).
+sam2:
+  checkpoint: /opt/sam2/checkpoints/sam2.1_hiera_small.pt
+  model_cfg: configs/sam2.1/sam2.1_hiera_s.yaml
+
+tracking:
+  # Per-frame SAM2 mask area (pixels) below this -> frame written as empty mask.
+  sam2_min_mask_pixels: 100

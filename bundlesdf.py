@@ -603,7 +603,9 @@ class BundleSdf:
       visibles = np.array(visibles)
       ids = np.argsort(visibles)[::-1]
       found = False
-      pdb.set_trace()
+      # pdb.set_trace()  # upstream leftover debug breakpoint; fires when a frame
+      # has too few matches with its ref frame. The loop below recovers by
+      # re-choosing a co-visible keyframe, so just let it run unattended.
       for id in ids:
         kf = self.bundler._keyframes[id]
         logging.info(f"trying new ref frame {kf._id_str}")
@@ -686,6 +688,12 @@ class BundleSdf:
     if percentile<100:   # Denoise
       logging.info("percentile denoise start")
       valid = (depth>=0.1) & (mask>0)
+      if not valid.any():
+        # Whole masked region has no valid depth (object outside the recorded
+        # depth range / reflective / motion blur) -> percentile([]) would crash.
+        # Such a frame carries no usable depth for tracking, so skip it.
+        logging.info(f"frame {id_str} has no valid depth within mask; skipping frame")
+        return
       thres = np.percentile(depth[valid], percentile)
       depth[depth>=thres] = 0
       logging.info("percentile denoise done")

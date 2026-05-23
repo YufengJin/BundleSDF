@@ -141,3 +141,14 @@ data/
 logs/
 !BundleTrack/XMem/inference/data
 run_used.yml
+
+demo_data/
+.claude/
+
+# Large bind-mounted build assets (SAM2 checkpoints etc.) — downloaded once on the
+# host and bind-mounted into the container, NOT baked into the image or committed.
+.docker_assets/
+
+docs/
+build_logs/
+

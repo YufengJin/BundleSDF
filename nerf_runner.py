@@ -1486,7 +1486,12 @@ class NerfRunner:
     tex_image = torch.zeros((tex_res,tex_res,3)).cuda().float()
     weight_tex_image = torch.zeros(tex_image.shape[:-1]).cuda().float()
     mesh.merge_vertices()
-    mesh.remove_duplicate_faces()
+    # trimesh>=4 removed remove_duplicate_faces(); update_faces(unique_faces()) is
+    # the documented replacement. Keep the old call for trimesh 3.x.
+    if hasattr(mesh, "remove_duplicate_faces"):
+      mesh.remove_duplicate_faces()
+    else:
+      mesh.update_faces(mesh.unique_faces())
     mesh = mesh.unwrap()
     H,W = tex_image.shape[:2]
     uvs_tex = (mesh.visual.uv*np.array([W-1,H-1]).reshape(1,2))    #(n_V,2)
@@ -1538,7 +1543,12 @@ class NerfRunner:
       tex_image[uvs_unique[:,1],uvs_unique[:,0]] += torch.from_numpy(ray_colors).cuda().float()[unique_ids]*cur_weights.reshape(-1,1)
       weight_tex_image[uvs_unique[:,1], uvs_unique[:,0]] += cur_weights
 
-    tex_image = tex_image/weight_tex_image[...,None]
+    # Only normalize texels that at least one keyframe projected onto; dividing the
+    # untouched (weight==0) texels would give 0/0=NaN, which then casts to garbage and
+    # leaves black speckles in the atlas. Leave uncovered texels at 0.
+    valid = weight_tex_image > 0
+    tex_image[valid] = tex_image[valid] / weight_tex_image[valid][...,None]
+    tex_image[~valid] = 0
     tex_image = tex_image.data.cpu().numpy()
     tex_image = np.clip(tex_image,0,255).astype(np.uint8)
     tex_image = tex_image[::-1].copy()
